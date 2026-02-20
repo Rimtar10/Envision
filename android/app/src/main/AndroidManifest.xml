@@ -4,7 +4,7 @@
     <uses-feature android:name="android.hardware.camera" android:required="true"/>
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
     <application
-        android:label="tensorflow_demo"
+        android:label="Envision"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

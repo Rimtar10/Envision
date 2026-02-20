@@ -1,6 +1,6 @@
 {
-    "name": "tensorflow_demo",
-    "short_name": "tensorflow_demo",
+    "name": "Envision",
+    "short_name": "Envision",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
