@@ -179,7 +179,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   }
 
   Future<void> _init() async {
-    final hasPermission = await _requestCameraPermission();
+    final hasPermission = await _requestPermissions();
     if (!hasPermission) return;
 
     await _initializeCamera();
@@ -205,20 +205,36 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   }
 
   /// Requests camera permission at runtime
-  Future<bool> _requestCameraPermission() async {
-    final status = await Permission.camera.status;
-    if (status.isGranted) return true;
+  Future<bool> _requestPermissions() async {
+    // Request both camera and microphone permissions
+    final cameraStatus = await Permission.camera.status;
+    final micStatus = await Permission.microphone.status;
 
-    final result = await Permission.camera.request();
-    if (result.isGranted) return true;
+    if (cameraStatus.isGranted && micStatus.isGranted) return true;
 
-    if (result.isPermanentlyDenied) {
-      message = 'Camera permission permanently denied.\nPlease enable it in Settings.';
-    } else {
-      message = 'Camera permission denied.';
+    final results = await [Permission.camera, Permission.microphone].request();
+    final cameraGranted = results[Permission.camera]?.isGranted ?? false;
+    final micGranted = results[Permission.microphone]?.isGranted ?? false;
+
+    if (cameraGranted && micGranted) return true;
+
+    // Check which permissions were denied
+    if (!cameraGranted) {
+      if (results[Permission.camera]?.isPermanentlyDenied ?? false) {
+        message = 'Camera permission permanently denied.\nPlease enable it in Settings.';
+      } else {
+        message = 'Camera permission denied.';
+      }
+    } else if (!micGranted) {
+      if (results[Permission.microphone]?.isPermanentlyDenied ?? false) {
+        message = 'Microphone permission permanently denied.\nPlease enable it in Settings.';
+      } else {
+        message = 'Microphone permission denied.';
+      }
     }
+
     if (mounted) setState(() {});
-    log('Camera permission denied: $result');
+    log('Permissions - Camera: ${results[Permission.camera]}, Mic: ${results[Permission.microphone]}');
     return false;
   }
 
@@ -323,10 +339,16 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   }
 
   Future<void> _startVoiceCommand() async {
-    await VoiceService.instance.startListening((command) {
-      // Handle custom commands if needed
-      print('Custom voice command: $command');
-    });
+    try {
+      print('🎤 Starting voice command...');
+      await VoiceService.instance.startListening((command) {
+        // Handle custom commands if needed
+        print('Custom voice command: $command');
+      });
+      print('🎤 Voice command started successfully');
+    } catch (e) {
+      print('🎤 Error starting voice command: $e');
+    }
   }
 
   /// Callback to receive each frame [CameraImage] perform inference on it

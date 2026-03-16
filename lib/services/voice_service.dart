@@ -27,11 +27,14 @@ class VoiceService {
   List<DetectedObjectDm> _currentDetections = [];
 
   Future<void> initialize() async {
+    print('🔊 Initializing VoiceService...');
+
     // Configure TTS
     await _tts.setLanguage("en-US");
     await _tts.setSpeechRate(0.5); // Slightly slower for clarity
     await _tts.setVolume(1.0);
     await _tts.setPitch(1.0);
+    print('🔊 TTS configured');
 
     // Listen for TTS completion
     _tts.setCompletionHandler(() {
@@ -40,10 +43,12 @@ class VoiceService {
     });
 
     // Initialize STT
-    await _stt.initialize(
+    print('🎤 Initializing STT...');
+    final sttAvailable = await _stt.initialize(
       onError: (error) => print('STT Error: $error'),
       onStatus: (status) => print('STT Status: $status'),
     );
+    print('🎤 STT initialized: $sttAvailable');
   }
 
   /// Main method: Announce detections (called every frame)

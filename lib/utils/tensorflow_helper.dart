@@ -79,7 +79,7 @@ class TensorflowHelper {
     required List<String> label,
     bool returnDetectedImage = true,
     bool drawObjectOnImage = true,
-    double confidenceThreshold = 0.5,  // Reduce false positives
+    double confidenceThreshold = 0.35,  // Balanced: reduce false positives but keep accuracy
     double iouThreshold = 0.45,
   }) {
     const modelSize = 640;
