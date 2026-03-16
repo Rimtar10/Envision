@@ -12,6 +12,9 @@ import 'package:tensorflow_demo/utils/tensorflow_helper.dart';
 import 'package:tensorflow_demo/values/enumerations.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 
+/// Debug logging flag - set to false in production to avoid console spam
+const bool _enableDebugLogs = false;
+
 /// A command sent between [Detector] and [_DetectorServer].
 class _Command {
   const _Command(this.processType, {this.args});
@@ -62,7 +65,7 @@ class Detector {
     receivePort.listen((message) {
       result._handleCommand(message as _Command);
     });
-    debugPrint('[Detector] Detector.start() complete, waiting for handshake...');
+    if (_enableDebugLogs) debugPrint('[Detector] Detector.start() complete, waiting for handshake...');
     return result;
   }
 
@@ -96,18 +99,18 @@ class Detector {
         ]));
       case TensorflowProcessType.ready:
         _isReady = true;
-        debugPrint('[Detector] Handshake complete, _isReady = true');
+        if (_enableDebugLogs) debugPrint('[Detector] Handshake complete, _isReady = true');
       case TensorflowProcessType.busy:
         _isReady = false;
       case TensorflowProcessType.result:
         _isReady = true;
         if (!_resultsStreamController.isClosed) {
           final results = command.args?[0] as List<DetectedObjectDm>;
-          debugPrint('[Detector] Got ${results.length} detections');
+          if (_enableDebugLogs) debugPrint('[Detector] Got ${results.length} detections');
           _resultsStreamController.add(results);
         }
       default:
-        debugPrint('Detector unrecognized command: ${command.processType}');
+        if (_enableDebugLogs) debugPrint('Detector unrecognized command: ${command.processType}');
     }
   }
 
@@ -190,22 +193,22 @@ class _DetectorServer {
         return;
       }
 
-      debugPrint('[DetectorServer] Image converted: ${image.width}x${image.height}');
+      if (_enableDebugLogs) debugPrint('[DetectorServer] Image converted: ${image.width}x${image.height}');
 
       // Rotate to match display orientation.
       // Android camera sensors produce landscape frames; sensorOrientation
       // tells us how many degrees CW to rotate for correct portrait display.
       if (_sensorOrientation != 0) {
         image = copyRotate(image, angle: _sensorOrientation);
-        debugPrint('[DetectorServer] Rotated ${_sensorOrientation}Â°: ${image.width}x${image.height}');
+        if (_enableDebugLogs) debugPrint('[DetectorServer] Rotated ${_sensorOrientation}Â°: ${image.width}x${image.height}');
       }
 
       final results = _analyseImageCamera(image);
 
       _sendPort.send(_Command(TensorflowProcessType.result, args: [results]));
     } catch (e, s) {
-      debugPrint('[DetectorServer] ERROR in _convertCameraImage: $e');
-      debugPrint('[DetectorServer] Stacktrace: $s');
+      if (_enableDebugLogs) debugPrint('[DetectorServer] ERROR in _convertCameraImage: $e');
+      if (_enableDebugLogs) debugPrint('[DetectorServer] Stacktrace: $s');
       // Always send result to restore _isReady
       _sendPort.send(_Command(TensorflowProcessType.result,
           args: [<DetectedObjectDm>[]]));
@@ -219,7 +222,7 @@ class _DetectorServer {
   /// via [DetectedObjectDm.renderLocation].
   List<DetectedObjectDm> _analyseImageCamera(Image image) {
     if (_interpreter == null) {
-      debugPrint('[DetectorServer] _interpreter is null!');
+      if (_enableDebugLogs) debugPrint('[DetectorServer] _interpreter is null!');
       return [];
     }
 

@@ -12,6 +12,10 @@ import 'package:tflite_flutter/tflite_flutter.dart';
 class TensorflowHelper {
   const TensorflowHelper._();
 
+  /// Reusable buffers for performance (avoid creating new Float32List every frame)
+  static final _inputBuffer = Float32List(1 * 640 * 640 * 3);
+  static final _outputBuffer = Float32List(1 * 84 * 8400);
+
   /// Cached once on first inference — model never changes between frames.
   static bool? _cachedUseSigmoid;
 
@@ -75,7 +79,7 @@ class TensorflowHelper {
     required List<String> label,
     bool returnDetectedImage = true,
     bool drawObjectOnImage = true,
-    double confidenceThreshold = 0.25,
+    double confidenceThreshold = 0.5,  // Reduce false positives
     double iouThreshold = 0.45,
   }) {
     const modelSize = 640;
@@ -133,24 +137,24 @@ class TensorflowHelper {
     Image image,
     Interpreter interpreter,
   ) {
-    // Create input tensor: [1, 640, 640, 3] normalized to [0.0, 1.0]
-    final inputBuffer = Float32List(1 * 640 * 640 * 3);
+    // Create input tensor: [1, 640, 640, 640, 3] normalized to [0.0, 1.0]
+    // Reuse static buffer for performance
     int offset = 0;
     for (int y = 0; y < image.height; y++) {
       for (int x = 0; x < image.width; x++) {
         final pixel = image.getPixel(x, y);
-        inputBuffer[offset++] = pixel.r.toDouble() / 255.0;
-        inputBuffer[offset++] = pixel.g.toDouble() / 255.0;
-        inputBuffer[offset++] = pixel.b.toDouble() / 255.0;
+        _inputBuffer[offset++] = pixel.r.toDouble() / 255.0;
+        _inputBuffer[offset++] = pixel.g.toDouble() / 255.0;
+        _inputBuffer[offset++] = pixel.b.toDouble() / 255.0;
       }
     }
-    final input = inputBuffer.reshape([1, 640, 640, 3]);
+    final input = _inputBuffer.reshape([1, 640, 640, 3]);
 
     // YOLOv8 output: [1, 84, 8400]
     // 84 = 4 bbox coords + 80 class scores
     // 8400 = number of predictions
-    final outputBuffer = Float32List(1 * 84 * 8400);
-    final output = outputBuffer.reshape([1, 84, 8400]);
+    // Reuse static buffer for performance
+    final output = _outputBuffer.reshape([1, 84, 8400]);
 
     // Run inference
     interpreter.run(input, output);

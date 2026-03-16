@@ -9,6 +9,9 @@ import 'package:tensorflow_demo/values/typedefs.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:tensorflow_demo/models/detected_object/detected_object_dm.dart';
 
+/// Debug logging flag - set to false in production to avoid console spam
+const bool _enableDebugLogs = false;
+
 class TensorflowService {
   const TensorflowService._({required this.modelPath, required this.labelPath});
 
@@ -36,21 +39,21 @@ class TensorflowService {
 
   Future<void> _loadModel() async {
   try {
-    print('🔴 STARTING MODEL LOAD');
+    if (_enableDebugLogs) print('🔴 STARTING MODEL LOAD');
     
     final delegate = switch (defaultTargetPlatform) {
       TargetPlatform.iOS => GpuDelegate(),
       _ => XNNPackDelegate(),
     };
 
-    print('🔴 LOADING INTERPRETER FROM: $modelPath');
+    if (_enableDebugLogs) print('🔴 LOADING INTERPRETER FROM: $modelPath');
     
     _interpreter = await Interpreter.fromAsset(
       modelPath,
       options: InterpreterOptions()..addDelegate(delegate),
     );
 
-    print('🔴 INTERPRETER LOADED SUCCESSFULLY');
+    if (_enableDebugLogs) print('🔴 INTERPRETER LOADED SUCCESSFULLY');
 
     final inputTensors = _interpreter.getInputTensors();
     log(
@@ -66,10 +69,10 @@ class TensorflowService {
 
     _interpreter.allocateTensors();
     
-    print('🔴 MODEL LOAD COMPLETE');
+    if (_enableDebugLogs) print('🔴 MODEL LOAD COMPLETE');
   } catch (e, stackTrace) {
-    print('🔴🔴🔴 MODEL LOAD FAILED: $e');
-    print('🔴🔴🔴 STACK TRACE: $stackTrace');
+    if (_enableDebugLogs) print('🔴🔴🔴 MODEL LOAD FAILED: $e');
+    if (_enableDebugLogs) print('🔴🔴🔴 STACK TRACE: $stackTrace');
     rethrow;
   }
 }

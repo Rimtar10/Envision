@@ -11,6 +11,7 @@ import 'package:tensorflow_demo/models/screen_params.dart';
 import 'package:tensorflow_demo/screens/live_object_detection/widgets/rounded_button.dart';
 import 'package:tensorflow_demo/services/detector.dart';
 import 'package:tensorflow_demo/services/navigation_service.dart';
+import 'package:tensorflow_demo/services/voice_service.dart';
 import 'package:tensorflow_demo/values/app_routes.dart';
 import 'package:tensorflow_demo/widgets/box_widget.dart';
 
@@ -26,6 +27,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   final _imagePicker = ImagePicker();
 
   String? message;
+
 
   late final AppLifecycleListener _appLifecycleListener;
 
@@ -47,6 +49,9 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   /// Results to draw bounding boxes
   List<DetectedObjectDm>? detectedObjectList;
 
+  // Timer for voice service cleanup
+  Timer? _cleanupTimer;
+
   @override
   void initState() {
     super.initState();
@@ -62,6 +67,11 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
       },
     );
     _init();
+
+    // Start periodic cleanup of voice cooldowns
+    _cleanupTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      VoiceService.instance.cleanupCooldowns();
+    });
   }
 
   @override
@@ -135,6 +145,20 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                             ),
                           ),
                         ),
+                        const SizedBox(width: 20),
+                        RoundedButton(
+                          size: 48,
+                          side: BorderSide.none,
+                          color: Colors.white.withOpacity(0.3),
+                          onTap: _startVoiceCommand,
+                          child: const Center(
+                            child: Icon(
+                              Icons.mic,
+                              color: Colors.white,
+                              size: 28,
+                            ),
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -151,6 +175,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     _cameraController?.dispose();
     _objectDetectorStream?.cancel();
     _detector?.stop();
+    _cleanupTimer?.cancel();
   }
 
   Future<void> _init() async {
@@ -241,6 +266,8 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
       _detector = detector;
       _objectDetectorStream = detector.resultsStream.listen((detectedObjects) {
         if (mounted) setState(() => detectedObjectList = detectedObjects);
+        // Announce detections using VoiceService
+        VoiceService.instance.announceDetections(detectedObjects);
       });
     });
   }
@@ -293,6 +320,13 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
         ..pop()
         ..pushNamed(AppRoutes.photoAnalyzedScreen, arguments: readAsBytesSync);
     }
+  }
+
+  Future<void> _startVoiceCommand() async {
+    await VoiceService.instance.startListening((command) {
+      // Handle custom commands if needed
+      print('Custom voice command: $command');
+    });
   }
 
   /// Callback to receive each frame [CameraImage] perform inference on it
