@@ -16,73 +16,43 @@ class ImageUtils {
   }
 
   static Image? _convertJPEGToImage(CameraImage cameraImage) {
-    // Extract the bytes from the CameraImage
-    // first plane is responsible for holding all the image data
     final bytes = cameraImage.planes[0].bytes;
-
-    // Create a new Image instance from the JPEG bytes
-    final image = decodeImage(bytes);
-
-    return image;
+    return decodeImage(bytes);
   }
 
   static Image _convertNV21ToRGBImage(CameraImage cameraImage) {
-    // Extract the bytes from the CameraImage
+    final width = cameraImage.width;
+    final height = cameraImage.height;
     final yuvBytes = cameraImage.planes[0].bytes;
     final vuBytes = cameraImage.planes[1].bytes;
 
-    // Create a new Image instance
-    final image = Image(
-      width: cameraImage.width,
-      height: cameraImage.height,
-    );
+    final rgbBytes = Uint8List(width * height * 3);
+    int dst = 0;
 
-    // Convert NV21 to RGB
-    _convertNV21ToRGB(
-      yuvBytes,
-      vuBytes,
-      cameraImage.width,
-      cameraImage.height,
-      image,
-    );
+    for (int y = 0; y < height; y++) {
+      final uvRow = y >> 1;
+      for (int x = 0; x < width; x++) {
+        final yVal = yuvBytes[y * width + x];
+        final uvIdx = (uvRow * (width ~/ 2) + (x >> 1)) * 2;
+        final v = vuBytes[uvIdx] - 128;     // V first in NV21
+        final u = vuBytes[uvIdx + 1] - 128; // U second
 
-    return image;
-  }
-
-  static void _convertNV21ToRGB(
-    Uint8List yuvBytes,
-    Uint8List vuBytes,
-    int width,
-    int height,
-    Image image,
-  ) {
-    // Conversion logic from NV21 to RGB
-    // ...
-
-    // Example conversion logic using the `imageLib` package
-    // This is just a placeholder and may not be the most efficient method
-    for (var y = 0; y < height; y++) {
-      for (var x = 0; x < width; x++) {
-        final yIndex = y * width + x;
-        final uvIndex = (y ~/ 2) * (width ~/ 2) + (x ~/ 2);
-
-        final yValue = yuvBytes[yIndex];
-        final vValue = vuBytes[uvIndex * 2];     // V comes first in NV21
-        final uValue = vuBytes[uvIndex * 2 + 1]; // U comes second
-
-        // Convert YUV to RGB
-        final r = yValue + 1.402 * (vValue - 128);
-        final g =
-            yValue - 0.344136 * (uValue - 128) - 0.714136 * (vValue - 128);
-        final b = yValue + 1.772 * (uValue - 128);
-
-        // Set the RGB pixel values in the Image instance
-        image.setPixelRgba(x, y, r.toInt(), g.toInt(), b.toInt(), 255);
+        rgbBytes[dst++] = (yVal + ((v * 1436) >> 10)).clamp(0, 255);
+        rgbBytes[dst++] = (yVal - ((u * 352) >> 10) - ((v * 731) >> 10)).clamp(0, 255);
+        rgbBytes[dst++] = (yVal + ((u * 1814) >> 10)).clamp(0, 255);
       }
     }
+
+    return Image.fromBytes(
+      width: width,
+      height: height,
+      bytes: rgbBytes.buffer,
+      numChannels: 3,
+      order: ChannelOrder.rgb,
+    );
   }
 
-  // Converts a [CameraImage] in BGRA888 format to [imageLib.Image] in RGB format
+  // Converts a [CameraImage] in BGRA888 format to [Image] in RGB format
   static Image _convertBGRA8888ToRGBImage(CameraImage cameraImage) {
     final firstPlane = cameraImage.planes[0];
     return Image.fromBytes(
@@ -94,52 +64,49 @@ class ImageUtils {
   }
 
   static Image _convertYUV420ToRGBImage(CameraImage cameraImage) {
-  final imageWidth = cameraImage.width;
-  final imageHeight = cameraImage.height;
+    final imageWidth = cameraImage.width;
+    final imageHeight = cameraImage.height;
 
-  final yPlane = cameraImage.planes[0];
-  final uPlane = cameraImage.planes[1];
-  final vPlane = cameraImage.planes[2];
+    final yPlane = cameraImage.planes[0];
+    final uPlane = cameraImage.planes[1];
+    final vPlane = cameraImage.planes[2];
 
-  final yBuffer = yPlane.bytes;
-  final uBuffer = uPlane.bytes;
-  final vBuffer = vPlane.bytes;
+    final yBuffer = yPlane.bytes;
+    final uBuffer = uPlane.bytes;
+    final vBuffer = vPlane.bytes;
 
-  final int yRowStride = yPlane.bytesPerRow;
-  final int yPixelStride = yPlane.bytesPerPixel!;
+    final int yRowStride = yPlane.bytesPerRow;
+    final int yPixelStride = yPlane.bytesPerPixel!;
+    final int uvRowStride = uPlane.bytesPerRow;
+    final int uvPixelStride = uPlane.bytesPerPixel!;
 
-  final int uvRowStride = uPlane.bytesPerRow;
-  final int uvPixelStride = uPlane.bytesPerPixel!;
+    // Direct buffer fill with fixed-point integer arithmetic —
+    // avoids setPixelRgb overhead and floating-point multiplications.
+    final rgbBytes = Uint8List(imageWidth * imageHeight * 3);
+    int dst = 0;
 
-  final image = Image(width: imageWidth, height: imageHeight);
+    for (int h = 0; h < imageHeight; h++) {
+      final uvh = h >> 1;
+      for (int w = 0; w < imageWidth; w++) {
+        final uvw = w >> 1;
+        final yVal = yBuffer[h * yRowStride + w * yPixelStride];
+        final uvIndex = uvh * uvRowStride + uvw * uvPixelStride;
+        final u = uBuffer[uvIndex] - 128;
+        final v = vBuffer[uvIndex] - 128;
 
-  for (int h = 0; h < imageHeight; h++) {
-    int uvh = (h / 2).floor();
-
-    for (int w = 0; w < imageWidth; w++) {
-      int uvw = (w / 2).floor();
-
-      final yIndex = (h * yRowStride) + (w * yPixelStride);
-      final int y = yBuffer[yIndex];
-
-      final int uvIndex = (uvh * uvRowStride) + (uvw * uvPixelStride);
-      
-      // CRITICAL FIX: Subtract 128 to center U/V values around 0
-      final int u = uBuffer[uvIndex] - 128;
-      final int v = vBuffer[uvIndex] - 128;
-
-      // Standard YUV to RGB conversion
-      int r = (y + 1.402 * v).round();
-      int g = (y - 0.344136 * u - 0.714136 * v).round();
-      int b = (y + 1.772 * u).round();
-
-      r = r.clamp(0, 255);
-      g = g.clamp(0, 255);
-      b = b.clamp(0, 255);
-
-      image.setPixelRgb(w, h, r, g, b);
+        // Fixed-point YUV→RGB (10-bit shift): replaces float multiply+round
+        rgbBytes[dst++] = (yVal + ((v * 1436) >> 10)).clamp(0, 255);
+        rgbBytes[dst++] = (yVal - ((u * 352) >> 10) - ((v * 731) >> 10)).clamp(0, 255);
+        rgbBytes[dst++] = (yVal + ((u * 1814) >> 10)).clamp(0, 255);
+      }
     }
+
+    return Image.fromBytes(
+      width: imageWidth,
+      height: imageHeight,
+      bytes: rgbBytes.buffer,
+      numChannels: 3,
+      order: ChannelOrder.rgb,
+    );
   }
-  return image;
-}
 }

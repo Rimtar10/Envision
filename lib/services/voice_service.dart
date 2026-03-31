@@ -17,97 +17,103 @@ class VoiceService {
   // Cooldown period (don't announce same object within 3 seconds)
   static const _cooldownSeconds = 3;
 
-  // Track if TTS is currently speaking (don't interrupt)
+  // Track if TTS is currently speaking
   bool _isSpeaking = false;
 
-  // Queue for pending announcements
-  final List<String> _speechQueue = [];
+  // Single pending message — replaces old queue to prevent speech pile-up.
+  // If TTS is busy, the latest message waits here; older ones are discarded.
+  String? _pendingMessage;
+
+  // Callback to notify UI when listening state changes
+  void Function(bool isListening)? onListeningStateChanged;
 
   // Store current detections for "what's in front of me" queries
   List<DetectedObjectDm> _currentDetections = [];
 
-  Future<void> initialize() async {
-    print('🔊 Initializing VoiceService...');
+  bool get isListening => _stt.isListening;
 
+  Future<void> initialize() async {
     // Configure TTS
     await _tts.setLanguage("en-US");
-    await _tts.setSpeechRate(0.5); // Slightly slower for clarity
+    await _tts.setSpeechRate(0.5);
     await _tts.setVolume(1.0);
     await _tts.setPitch(1.0);
-    print('🔊 TTS configured');
 
-    // Listen for TTS completion
-    _tts.setCompletionHandler(() {
-      _isSpeaking = false;
-      _processQueue(); // Speak next item in queue
-    });
+    // All three handlers reset _isSpeaking so the pending message can play
+    _tts.setCompletionHandler(_onTtsDone);
+    _tts.setCancelHandler(_onTtsDone);
+    _tts.setErrorHandler((_) => _onTtsDone());
 
     // Initialize STT
-    print('🎤 Initializing STT...');
     final sttAvailable = await _stt.initialize(
-      onError: (error) => print('STT Error: $error'),
-      onStatus: (status) => print('STT Status: $status'),
+      onError: (error) {
+        print('STT Error: $error');
+        onListeningStateChanged?.call(false);
+      },
+      onStatus: (status) {
+        print('STT Status: $status');
+        // "notListening" / "done" both mean listening has stopped
+        if (status == 'notListening' || status == 'done') {
+          onListeningStateChanged?.call(false);
+        }
+      },
     );
-    print('🎤 STT initialized: $sttAvailable');
+    print('STT initialized: $sttAvailable');
+  }
+
+  void _onTtsDone() {
+    _isSpeaking = false;
+    _processPending();
   }
 
   /// Main method: Announce detections (called every frame)
   Future<void> announceDetections(List<DetectedObjectDm> detections) async {
     if (detections.isEmpty) return;
 
-    // Store current detections for voice queries
+    // Don't queue TTS announcements while user is speaking
+    if (_stt.isListening) return;
+
     _currentDetections = detections;
 
-    // Find NEAREST object (highest priority)
     final nearest = _findNearestObject(detections);
     if (nearest == null) return;
 
-    // Calculate distance
     final distance = _estimateDistance(nearest.label, nearest.location);
     final distanceCategory = _getDistanceCategory(distance);
 
-    // Check cooldown - don't announce same object repeatedly
     final key = '${nearest.label}_$distanceCategory';
     final lastTime = _lastAnnounced[key];
     final now = DateTime.now();
 
     if (lastTime != null &&
         now.difference(lastTime).inSeconds < _cooldownSeconds) {
-      return; // Still in cooldown period
+      return;
     }
 
-    // Update last announced time
     _lastAnnounced[key] = now;
 
-    // Create announcement
-    String message;
-    if (distance > 0) {
-      message = '${nearest.label} $distanceCategory';
-    } else {
-      message = nearest.label;
-    }
+    final message = distance > 0
+        ? '${nearest.label} $distanceCategory'
+        : nearest.label;
 
-    // Add to queue and process
     _speak(message);
   }
 
-  /// Find nearest object based on bounding box size
+  /// Find nearest object based on bounding box area (larger = closer)
   DetectedObjectDm? _findNearestObject(List<DetectedObjectDm> detections) {
     if (detections.isEmpty) return null;
-
-    // Larger bounding box = closer object
     detections.sort((a, b) {
       final areaA = a.location.width * a.location.height;
       final areaB = b.location.width * b.location.height;
-      return areaB.compareTo(areaA); // Descending
+      return areaB.compareTo(areaA);
     });
-
     return detections.first;
   }
 
-  /// Estimate distance using object size heuristics
+  /// Estimate distance using pinhole camera model.
+  /// bounding box coords are in model space (0–640).
+  /// Focal length ~500px is more accurate for typical phone cameras at 640px.
   double _estimateDistance(String label, Rect boundingBox) {
-    // Known average heights in real world (meters)
     final Map<String, double> objectHeights = {
       'person': 1.7,
       'chair': 0.9,
@@ -141,41 +147,43 @@ class VoiceService {
 
     if (!objectHeights.containsKey(label)) return -1;
 
-    // Camera focal length (approximate - works for most phones)
-    const double focalLength = 600; // pixels
+    // Typical phone camera focal length in 640px image space is ~500px
+    // (derived from ~60° vertical FOV: f = 640 / (2 * tan(30°)) ≈ 554)
+    const double focalLength = 500.0;
 
-    // Calculate distance: distance = (realHeight * focalLength) / pixelHeight
-    double pixelHeight = boundingBox.height;
-    double realHeight = objectHeights[label]!;
+    final double pixelHeight = boundingBox.height;
+    if (pixelHeight <= 0) return -1;
 
-    double distance = (realHeight * focalLength) / pixelHeight;
-
-    return distance; // meters
+    return (objectHeights[label]! * focalLength) / pixelHeight;
   }
 
   /// Convert distance to human-friendly category
   String _getDistanceCategory(double meters) {
-    if (meters < 0) return ''; // Unknown distance
-    if (meters < 0.8) return 'very close';
-    if (meters < 2.0) return 'close';
-    if (meters < 4.0) return 'ahead';
+    if (meters < 0) return '';
+    if (meters < 1.0) return 'very close';
+    if (meters < 2.5) return 'close';
+    if (meters < 5.0) return 'ahead';
     return 'far ahead';
   }
 
-  /// Speak text (queued to avoid interruption)
+  /// Queue a message: only the latest pending message is kept.
+  /// If nothing is speaking, speak immediately.
   void _speak(String message) {
-    _speechQueue.add(message);
-    _processQueue();
+    if (_isSpeaking) {
+      // Replace any pending message with the newer one
+      _pendingMessage = message;
+    } else {
+      _pendingMessage = message;
+      _processPending();
+    }
   }
 
-  /// Process speech queue (don't interrupt current speech)
-  Future<void> _processQueue() async {
-    if (_isSpeaking || _speechQueue.isEmpty) return;
-
+  Future<void> _processPending() async {
+    if (_isSpeaking || _pendingMessage == null) return;
+    final message = _pendingMessage!;
+    _pendingMessage = null;
     _isSpeaking = true;
-    final message = _speechQueue.removeAt(0);
-
-    print('🔊 Speaking: $message');
+    print('Speaking: $message');
     await _tts.speak(message);
   }
 
@@ -186,17 +194,15 @@ class VoiceService {
       return;
     }
 
-    // Sort by distance (nearest first)
     final sorted = [..._currentDetections];
     sorted.sort((a, b) {
       final distA = _estimateDistance(a.label, a.location);
       final distB = _estimateDistance(b.label, b.location);
-      if (distA < 0) return 1; // Unknown distances go last
+      if (distA < 0) return 1;
       if (distB < 0) return -1;
       return distA.compareTo(distB);
     });
 
-    // Create description
     final items = sorted.take(5).map((det) {
       final dist = _estimateDistance(det.label, det.location);
       final category = _getDistanceCategory(dist);
@@ -209,7 +215,8 @@ class VoiceService {
   /// Voice command: Count specific objects
   Future<void> countObjects(String objectName) async {
     final count = _currentDetections
-        .where((det) => det.label.toLowerCase().contains(objectName.toLowerCase()))
+        .where((det) =>
+            det.label.toLowerCase().contains(objectName.toLowerCase()))
         .length;
 
     if (count == 0) {
@@ -221,58 +228,63 @@ class VoiceService {
     }
   }
 
-  /// Start listening for voice commands
+  /// Start listening for voice commands.
+  /// Stops TTS first so mic doesn't pick up the speaker.
   Future<void> startListening(Function(String) onCommand) async {
     if (!_stt.isAvailable) {
       print('Speech recognition not available');
       return;
     }
 
+    // Stop any ongoing speech before listening
+    await stopSpeaking();
+
     await _stt.listen(
       onResult: (result) {
         if (result.finalResult) {
           final command = result.recognizedWords.toLowerCase();
-          print('🎤 Heard: $command');
+          print('Heard: $command');
 
-          // Process commands
           if (command.contains('what') &&
               (command.contains('front') || command.contains('see'))) {
             describeScene();
           } else if (command.contains('how many')) {
-            // Extract object name
             final words = command.split(' ');
             final objectIndex = words.indexOf('many') + 1;
             if (objectIndex < words.length) {
-              final objectName = words[objectIndex];
-              countObjects(objectName);
+              countObjects(words[objectIndex]);
             }
           } else {
-            onCommand(command); // Custom command handling
+            onCommand(command);
           }
+
+          onListeningStateChanged?.call(false);
         }
       },
-      listenFor: Duration(seconds: 5),
-      pauseFor: Duration(seconds: 3),
+      listenFor: const Duration(seconds: 5),
+      pauseFor: const Duration(seconds: 3),
     );
+
+    onListeningStateChanged?.call(true);
   }
 
   /// Stop listening
   Future<void> stopListening() async {
     await _stt.stop();
+    onListeningStateChanged?.call(false);
   }
 
-  /// Stop speaking immediately
+  /// Stop speaking immediately and clear any pending message
   Future<void> stopSpeaking() async {
-    await _tts.stop();
+    _pendingMessage = null;
     _isSpeaking = false;
-    _speechQueue.clear();
+    await _tts.stop();
   }
 
   /// Clean up old cooldown entries (call periodically)
   void cleanupCooldowns() {
     final now = DateTime.now();
-    _lastAnnounced.removeWhere((key, time) =>
-      now.difference(time).inSeconds > _cooldownSeconds * 2
-    );
+    _lastAnnounced.removeWhere(
+        (key, time) => now.difference(time).inSeconds > _cooldownSeconds * 2);
   }
 }

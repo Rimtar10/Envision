@@ -52,6 +52,9 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   // Timer for voice service cleanup
   Timer? _cleanupTimer;
 
+  // Whether STT is currently recording
+  bool _isListening = false;
+
   @override
   void initState() {
     super.initState();
@@ -72,6 +75,11 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     _cleanupTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       VoiceService.instance.cleanupCooldowns();
     });
+
+    // Keep UI in sync with STT state
+    VoiceService.instance.onListeningStateChanged = (listening) {
+      if (mounted) setState(() => _isListening = listening);
+    };
   }
 
   @override
@@ -148,12 +156,16 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                         const SizedBox(width: 20),
                         RoundedButton(
                           size: 48,
-                          side: BorderSide.none,
-                          color: Colors.white.withOpacity(0.3),
-                          onTap: _startVoiceCommand,
-                          child: const Center(
+                          side: _isListening
+                              ? const BorderSide(color: Colors.red, width: 2)
+                              : BorderSide.none,
+                          color: _isListening
+                              ? Colors.red.withValues(alpha: 0.4)
+                              : Colors.white.withValues(alpha: 0.3),
+                          onTap: _toggleVoiceCommand,
+                          child: Center(
                             child: Icon(
-                              Icons.mic,
+                              _isListening ? Icons.mic : Icons.mic_none,
                               color: Colors.white,
                               size: 28,
                             ),
@@ -260,7 +272,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     final camera = cameras[cameraIndex];
     _cameraController = CameraController(
       camera,
-      ResolutionPreset.medium,
+      ResolutionPreset.low,
       enableAudio: false,
     );
 
@@ -298,7 +310,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     _cameraController?.dispose();
     _cameraController = CameraController(
       cameras[newIndex],
-      ResolutionPreset.medium,
+      ResolutionPreset.low,
       enableAudio: false,
     )..initialize().then((_) async {
         await _cameraController?.startImageStream(onLatestImageAvailable);
@@ -338,16 +350,11 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     }
   }
 
-  Future<void> _startVoiceCommand() async {
-    try {
-      print('🎤 Starting voice command...');
-      await VoiceService.instance.startListening((command) {
-        // Handle custom commands if needed
-        print('Custom voice command: $command');
-      });
-      print('🎤 Voice command started successfully');
-    } catch (e) {
-      print('🎤 Error starting voice command: $e');
+  Future<void> _toggleVoiceCommand() async {
+    if (VoiceService.instance.isListening) {
+      await VoiceService.instance.stopListening();
+    } else {
+      await VoiceService.instance.startListening((_) {});
     }
   }
 
