@@ -38,8 +38,8 @@ dependencies:
   tflite_flutter: ^0.12.1
   image: ^4.5.2
   image_picker: ^1.1.2
-  camera: ^0.11.3+1
-  permission_handler: ^11.3.1
+  camera: ^0.12.0+1
+  permission_handler: ^12.0.1
   retrofit: ^4.1.0
   json_annotation: ^4.8.1
   dio: ^5.4.3+1
@@ -49,6 +49,8 @@ dependencies:
   flutter_svg: ^2.0.17
   flutter_tts: ^4.0.2
   speech_to_text: ^7.0.0
+  battery_plus: ^7.0.0
+  intl: ^0.20.2
 
 dev_dependencies:
   flutter_test:

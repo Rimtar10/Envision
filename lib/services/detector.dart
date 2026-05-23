@@ -41,8 +41,19 @@ class Detector {
 
   bool _isReady = false;
 
-  // // Similarly, StreamControllers are stored in a queue so they can be handled
-  // // asynchronously and serially.
+  // ── Frame throttle ────────────────────────────────────────────────────────
+  // Camera delivers ~30 fps; detection doesn't need more than ~12 fps.
+  // Throttling reduces isolate message overhead and CPU heat without any
+  // perceptible lag for the user.
+  DateTime _lastFrameTime = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _minFrameInterval = Duration(milliseconds: 80);
+
+  // ── Stability filter ─────────────────────────────────────────────────────
+  // A detection is only emitted if the same label was also seen in the
+  // previous frame. Eliminates single-frame phantom detections (false positives
+  // that flicker in for one frame). Latency cost: just one frame (~80 ms).
+  List<DetectedObjectDm> _previousResults = [];
+
   final StreamController<List<DetectedObjectDm>> _resultsStreamController =
       StreamController<List<DetectedObjectDm>>();
 
@@ -72,6 +83,9 @@ class Detector {
   /// Starts CameraImage processing
   void processFrame(CameraImage cameraImage) {
     if (_isReady) {
+      final now = DateTime.now();
+      if (now.difference(_lastFrameTime) < _minFrameInterval) return;
+      _lastFrameTime = now;
       _sendPort.send(
         _Command(TensorflowProcessType.detect, args: [cameraImage]),
       );
@@ -105,13 +119,28 @@ class Detector {
       case TensorflowProcessType.result:
         _isReady = true;
         if (!_resultsStreamController.isClosed) {
-          final results = command.args?[0] as List<DetectedObjectDm>;
-          if (_enableDebugLogs) debugPrint('[Detector] Got ${results.length} detections');
-          _resultsStreamController.add(results);
+          final rawResults = command.args?[0] as List<DetectedObjectDm>;
+          final stableResults = _stabilize(rawResults);
+          _previousResults = rawResults;
+          if (_enableDebugLogs) {
+            debugPrint('[Detector] raw=${rawResults.length} stable=${stableResults.length}');
+          }
+          _resultsStreamController.add(stableResults);
         }
       default:
         if (_enableDebugLogs) debugPrint('Detector unrecognized command: ${command.processType}');
     }
+  }
+
+  /// Keeps only detections whose label was also present in the previous frame.
+  /// If ALL detections are brand-new (first appearance), passes them through
+  /// so the screen doesn't blank out when a new object enters the frame.
+  List<DetectedObjectDm> _stabilize(List<DetectedObjectDm> current) {
+    if (_previousResults.isEmpty) return current;
+    final prevLabels = _previousResults.map((d) => d.label).toSet();
+    final stable = current.where((d) => prevLabels.contains(d.label)).toList();
+    // Fall back to raw list so the first frame of a new object isn't skipped
+    return stable.isEmpty ? current : stable;
   }
 
   /// Kills the background isolate and its detector server.

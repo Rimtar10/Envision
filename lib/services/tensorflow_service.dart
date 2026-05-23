@@ -25,32 +25,54 @@ class TensorflowService {
 
   static late final Interpreter _interpreter;
   static late final List<String>? _labels;
+  static bool _isInitialized = false;
+  static Future<void>? _initializationFuture;
 
   Interpreter get interpreter => _interpreter;
 
   List<String> get labels => _labels ?? [];
 
   Future<void> initialize() async {
-    await Future.wait([
+    if (_isInitialized) return;
+    if (_initializationFuture != null) return _initializationFuture!;
+
+    _initializationFuture = Future.wait([
       _loadModel(),
       _loadLabels(),
-    ]);
+    ]).then((_) {
+      _isInitialized = true;
+    }).whenComplete(() {
+      _initializationFuture = null;
+    });
+
+    return _initializationFuture!;
+  }
+
+  Future<void> ensureInitialized() async {
+    await initialize();
   }
 
   Future<void> _loadModel() async {
   try {
     if (_enableDebugLogs) print('🔴 STARTING MODEL LOAD');
-    
+
+    // Use 4 threads on Android (Snapdragon/Mali multi-core), 2 elsewhere.
+    // XNNPackDelegate with numThreads gives ~2–3× speedup over single-thread.
     final delegate = switch (defaultTargetPlatform) {
       TargetPlatform.iOS => GpuDelegate(),
-      _ => XNNPackDelegate(),
+      TargetPlatform.android => XNNPackDelegate(
+        options: XNNPackDelegateOptions(numThreads: 4),
+      ),
+      _ => XNNPackDelegate(options: XNNPackDelegateOptions(numThreads: 2)),
     };
 
     if (_enableDebugLogs) print('🔴 LOADING INTERPRETER FROM: $modelPath');
-    
+
     _interpreter = await Interpreter.fromAsset(
       modelPath,
-      options: InterpreterOptions()..addDelegate(delegate),
+      options: InterpreterOptions()
+        ..threads = 4          // parallelise ops not handled by the delegate
+        ..addDelegate(delegate),
     );
 
     if (_enableDebugLogs) print('🔴 INTERPRETER LOADED SUCCESSFULLY');

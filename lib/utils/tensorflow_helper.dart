@@ -20,6 +20,31 @@ class TensorflowHelper {
   /// Cached once on first inference — model never changes between frames.
   static bool? _cachedUseSigmoid;
 
+  // ── Class-specific confidence thresholds ─────────────────────────────────
+  // Hazardous / mobility-relevant classes use a lower threshold so they are
+  // rarely missed. Everything else uses the general confidenceThreshold (0.40).
+  // The pre-filter pass uses _minEffectiveThreshold so no candidate is skipped
+  // before we know its class label.
+  static const double _minEffectiveThreshold = 0.28;
+
+  static const Map<String, double> _hazardThresholds = {
+    'person':          0.28,
+    'car':             0.28,
+    'truck':           0.28,
+    'bus':             0.28,
+    'motorcycle':      0.28,
+    'bicycle':         0.30,
+    'dog':             0.32,
+    'fire hydrant':    0.34,
+    'stop sign':       0.34,
+    'traffic light':   0.34,
+    'bench':           0.38,
+    'chair':           0.38,
+    'dining table':    0.38,
+    'stairs':          0.30,
+    'door':            0.34,
+  };
+
   static void drawOnImage({
     required Image imageInput,
     required Rect rect,
@@ -131,7 +156,7 @@ class TensorflowHelper {
     required List<String> label,
     bool returnDetectedImage = true,
     bool drawObjectOnImage = true,
-    double confidenceThreshold = 0.35,
+    double confidenceThreshold = 0.40, // raised from 0.35 — fewer false positives
     double iouThreshold = 0.45,
   }) {
     // Single-pass: fill model input buffer + get letterbox pad values
@@ -231,9 +256,11 @@ class TensorflowHelper {
     }
     final bool useSigmoid = _cachedUseSigmoid!;
 
-    final double rawThreshold = useSigmoid
-        ? log(confidenceThreshold / (1.0 - confidenceThreshold))
-        : confidenceThreshold;
+    // Pre-filter using the lowest possible effective threshold so no hazard
+    // class candidate is discarded before we read its label.
+    final double rawPreFilter = useSigmoid
+        ? log(_minEffectiveThreshold / (1.0 - _minEffectiveThreshold))
+        : _minEffectiveThreshold;
 
     for (int i = 0; i < 8400; i++) {
       double maxRaw = -double.infinity;
@@ -247,10 +274,16 @@ class TensorflowHelper {
         }
       }
 
-      if (maxRaw < rawThreshold) continue;
+      if (maxRaw < rawPreFilter) continue;
 
       final double maxScore = useSigmoid ? _sigmoid(maxRaw) : maxRaw;
-      if (maxScore < confidenceThreshold) continue;
+
+      // Apply class-specific threshold: hazard classes use a lower bar,
+      // everything else uses the general confidenceThreshold.
+      final labelName = bestClass < labels.length ? labels[bestClass] : '';
+      final double effectiveThreshold =
+          _hazardThresholds[labelName] ?? confidenceThreshold;
+      if (maxScore < effectiveThreshold) continue;
 
       {
         final cx = data[0][i] * 640;
@@ -277,7 +310,7 @@ class TensorflowHelper {
           'y2': y2,
           'class': bestClass,
           'confidence': maxScore,
-          'label': bestClass < labels.length ? labels[bestClass] : '???',
+          'label': labelName.isEmpty ? '???' : labelName,
         });
       }
     }
