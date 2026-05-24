@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:tensorflow_demo/models/detected_object/detected_object_dm.dart';
 import 'package:tensorflow_demo/services/snackbar_service.dart';
-
+import 'package:tensorflow_demo/services/voice_service.dart';
 import 'package:tensorflow_demo/services/tensorflow_service.dart';
 import 'package:tensorflow_demo/screens/photo_analyzed/widgets/detected_object_tile.dart';
 
@@ -102,7 +102,22 @@ class _PhotoAnalyzedScreenState extends State<PhotoAnalyzedScreen> {
         detectedObjectList = output.detectedObjects;
         SnackBarService.remove();
         if (mounted) setState(() {});
+
+        // Announce results by voice so blind users can hear what was found
+        _announceResults(detectedObjectList);
       },
     );
+  }
+
+  void _announceResults(List<DetectedObjectDm> results) {
+    if (results.isEmpty) {
+      VoiceService.instance.speak('No objects detected in the photo.');
+      return;
+    }
+    final labels = results.map((r) => r.label).toSet().toList();
+    final summary = labels.length == 1
+        ? 'Found one ${labels.first} in the photo.'
+        : 'Found ${labels.length} types of objects: ${labels.join(', ')}.';
+    VoiceService.instance.speak(summary);
   }
 }

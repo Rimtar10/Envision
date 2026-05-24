@@ -1,9 +1,6 @@
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import 'package:tensorflow_demo/screens/home/home_screen.dart';
-import 'package:tensorflow_demo/screens/home/home_screen_store.dart';
 import 'package:tensorflow_demo/screens/live_object_detection/live_object_detection_screen.dart';
 import 'package:tensorflow_demo/screens/photo_analyzed/photo_analyze_screen.dart';
 import 'package:tensorflow_demo/values/app_routes.dart';
@@ -22,30 +19,24 @@ class Routes {
     }
 
     switch (settings.name) {
+      // '/' — root of the app — goes directly to the camera.
+      // HomeScreen (Unsplash API) is removed from the navigation stack entirely.
       case AppRoutes.homeScreen:
-        return getRoute(
-          widget: Provider(
-            create: (_) => HomeScreenStore()..initialize(),
-            child: const HomeScreen(),
-          ),
-        );
-      case AppRoutes.photoAnalyzedScreen:
-        final imageBytes = settings.arguments as Uint8List?;
+        return getRoute(widget: const LiveObjectDetectionScreen());
 
-        return getRoute(
-          widget: imageBytes?.isEmpty ?? true
-              ? const Placeholder()
-              : PhotoAnalyzedScreen(
-                  imageBytes: imageBytes!,
-                ),
-        );
       case AppRoutes.cameraScreen:
         return getRoute(widget: const LiveObjectDetectionScreen());
 
-      /// An invalid route. User shouldn't see this, it's for debugging purpose
-      /// only.
+      case AppRoutes.photoAnalyzedScreen:
+        final imageBytes = settings.arguments as Uint8List?;
+        // Guard: if somehow bytes are missing, go back to the camera.
+        if (imageBytes == null || imageBytes.isEmpty) {
+          return getRoute(widget: const LiveObjectDetectionScreen());
+        }
+        return getRoute(widget: PhotoAnalyzedScreen(imageBytes: imageBytes));
+
       default:
-        return getRoute(widget: const Placeholder());
+        return getRoute(widget: const LiveObjectDetectionScreen());
     }
   }
 }

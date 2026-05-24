@@ -1,5 +1,3 @@
-import 'dart:developer';
-
 import 'package:flutter/cupertino.dart';
 import 'package:tensorflow_demo/models/screen_params.dart';
 import 'package:tensorflow_demo/values/app_constants.dart';

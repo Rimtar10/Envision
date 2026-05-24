@@ -1,19 +1,49 @@
-import 'dart:developer' as dev;
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:image/image.dart';
 import 'package:tensorflow_demo/models/detected_object/detected_object_dm.dart';
-import 'package:tensorflow_demo/values/app_constants.dart';
 import 'package:tensorflow_demo/values/typedefs.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 
 class TensorflowHelper {
   const TensorflowHelper._();
 
+  /// Reusable buffers — avoid allocations on every frame
+  static final _inputBuffer = Float32List(1 * 640 * 640 * 3);
+  static final _outputBuffer = Float32List(1 * 84 * 8400);
+
+  /// Pre-allocated x-coordinate map for letterbox sampling (640 entries)
+  static final _xSrcMap = Int32List(640);
+
   /// Cached once on first inference — model never changes between frames.
   static bool? _cachedUseSigmoid;
+
+  // ── Class-specific confidence thresholds ─────────────────────────────────
+  // Hazardous / mobility-relevant classes use a lower threshold so they are
+  // rarely missed. Everything else uses the general confidenceThreshold (0.40).
+  // The pre-filter pass uses _minEffectiveThreshold so no candidate is skipped
+  // before we know its class label.
+  static const double _minEffectiveThreshold = 0.28;
+
+  static const Map<String, double> _hazardThresholds = {
+    'person':          0.28,
+    'car':             0.28,
+    'truck':           0.28,
+    'bus':             0.28,
+    'motorcycle':      0.28,
+    'bicycle':         0.30,
+    'dog':             0.32,
+    'fire hydrant':    0.34,
+    'stop sign':       0.34,
+    'traffic light':   0.34,
+    'bench':           0.38,
+    'chair':           0.38,
+    'dining table':    0.38,
+    'stairs':          0.30,
+    'door':            0.34,
+  };
 
   static void drawOnImage({
     required Image imageInput,
@@ -27,7 +57,6 @@ class TensorflowHelper {
     final top = rect.top.toInt();
     final left = rect.left.toInt();
 
-    // Rectangle drawing
     drawRect(
       imageInput,
       x1: left,
@@ -38,7 +67,6 @@ class TensorflowHelper {
       thickness: 3,
     );
 
-    // Label drawing
     if (classification == null) return;
     drawString(
       imageInput,
@@ -51,7 +79,7 @@ class TensorflowHelper {
   }
 
   /// Letterbox resize: scale image to fit 640x640 while preserving aspect ratio,
-  /// then center on a black canvas.
+  /// then center on a black canvas. Used only when drawing/returning image.
   static Image _resizeWithLetterbox(Image inputImage) {
     const modelInputSize = 640;
     double scale = modelInputSize / max(inputImage.width, inputImage.height);
@@ -69,29 +97,73 @@ class TensorflowHelper {
     return canvas;
   }
 
+  /// Single-pass: fills [_inputBuffer] with a letterboxed, normalized view of
+  /// [image] and returns (padX, padY) for bounding-box coordinate remapping.
+  ///
+  /// Eliminates the intermediate 640×640 [Image] allocation used in the old
+  /// pipeline for the camera path where no drawing is needed.
+  static (double, double) _fillInputBufferLetterbox(Image image) {
+    const modelSize = 640;
+    final scale = modelSize / max(image.width, image.height);
+    final newWidth = (image.width * scale).round();
+    final newHeight = (image.height * scale).round();
+    final xOffset = (modelSize - newWidth) ~/ 2;
+    final yOffset = (modelSize - newHeight) ~/ 2;
+    final srcWidth = image.width;
+    final srcHeight = image.height;
+
+    // Pre-compute source-x for each model-x column (replaces per-pixel division)
+    for (int x = 0; x < modelSize; x++) {
+      _xSrcMap[x] = (x < xOffset || x >= xOffset + newWidth)
+          ? -1
+          : ((x - xOffset) / scale).round().clamp(0, srcWidth - 1);
+    }
+
+    // Raw RGB bytes — direct memory access, no per-pixel overhead
+    final bytes = image.getBytes(order: ChannelOrder.rgb);
+
+    int offset = 0;
+    const inv255 = 1.0 / 255.0;
+
+    for (int y = 0; y < modelSize; y++) {
+      final srcY = (y < yOffset || y >= yOffset + newHeight)
+          ? -1
+          : ((y - yOffset) / scale).round().clamp(0, srcHeight - 1);
+      final rowBase = srcY < 0 ? 0 : srcY * srcWidth;
+
+      for (int x = 0; x < modelSize; x++) {
+        final srcX = _xSrcMap[x];
+        if (srcY < 0 || srcX < 0) {
+          _inputBuffer[offset] = 0.0;
+          _inputBuffer[offset + 1] = 0.0;
+          _inputBuffer[offset + 2] = 0.0;
+        } else {
+          final srcOff = (rowBase + srcX) * 3;
+          _inputBuffer[offset] = bytes[srcOff] * inv255;
+          _inputBuffer[offset + 1] = bytes[srcOff + 1] * inv255;
+          _inputBuffer[offset + 2] = bytes[srcOff + 2] * inv255;
+        }
+        offset += 3;
+      }
+    }
+
+    return (xOffset.toDouble(), yOffset.toDouble());
+  }
+
   static AnalyseImageCallback analyseImage(
     Image image, {
     required Interpreter interpreter,
     required List<String> label,
     bool returnDetectedImage = true,
     bool drawObjectOnImage = true,
-    double confidenceThreshold = 0.25,
+    double confidenceThreshold = 0.40, // raised from 0.35 — fewer false positives
     double iouThreshold = 0.45,
   }) {
-    const modelSize = 640;
+    // Single-pass: fill model input buffer + get letterbox pad values
+    final (padX, padY) = _fillInputBufferLetterbox(image);
 
-    // Always use letterbox (preserves aspect ratio → better accuracy)
-    final resizedImage = _resizeWithLetterbox(image);
-
-    // Run YOLOv8 inference
-    final rawOutput = _runYoloInference(resizedImage, interpreter);
-
-    // Compute inverse-transform to map 640x640 bbox back to original image
-    final double scale = modelSize / max(image.width, image.height);
-    final int newW = (image.width * scale).round();
-    final int newH = (image.height * scale).round();
-    final double padX = (modelSize - newW) / 2.0;
-    final double padY = (modelSize - newH) / 2.0;
+    // Run YOLOv8 inference on pre-filled buffer
+    final rawOutput = _runInferenceOnly(interpreter);
 
     // Parse YOLOv8 output and apply NMS
     final detectedObjectList = _parseYoloOutput(
@@ -103,7 +175,13 @@ class TensorflowHelper {
       padY: padY,
     );
 
-    // Draw bounding boxes if requested
+    // Camera path: skip all image work (most common case)
+    if (!drawObjectOnImage && !returnDetectedImage) {
+      return (imageBytes: null, detectedObjects: detectedObjectList);
+    }
+
+    // Photo path: create letterbox Image only when drawing/returning is needed
+    final resizedImage = _resizeWithLetterbox(image);
     if (drawObjectOnImage) {
       for (var detection in detectedObjectList) {
         drawOnImage(
@@ -115,7 +193,6 @@ class TensorflowHelper {
       }
     }
 
-    // Encode output image if requested
     final imageOutput = returnDetectedImage
         ? encodeJpg(
             copyResize(
@@ -129,33 +206,13 @@ class TensorflowHelper {
     return (imageBytes: imageOutput, detectedObjects: detectedObjectList);
   }
 
-  static List<List<List<double>>> _runYoloInference(
-    Image image,
-    Interpreter interpreter,
-  ) {
-    // Create input tensor: [1, 640, 640, 3] normalized to [0.0, 1.0]
-    final inputBuffer = Float32List(1 * 640 * 640 * 3);
-    int offset = 0;
-    for (int y = 0; y < image.height; y++) {
-      for (int x = 0; x < image.width; x++) {
-        final pixel = image.getPixel(x, y);
-        inputBuffer[offset++] = pixel.r.toDouble() / 255.0;
-        inputBuffer[offset++] = pixel.g.toDouble() / 255.0;
-        inputBuffer[offset++] = pixel.b.toDouble() / 255.0;
-      }
-    }
-    final input = inputBuffer.reshape([1, 640, 640, 3]);
+  /// Runs inference on the pre-filled [_inputBuffer] and returns raw output.
+  static List<List<List<double>>> _runInferenceOnly(Interpreter interpreter) {
+    final input = _inputBuffer.reshape([1, 640, 640, 3]);
+    final output = _outputBuffer.reshape([1, 84, 8400]);
 
-    // YOLOv8 output: [1, 84, 8400]
-    // 84 = 4 bbox coords + 80 class scores
-    // 8400 = number of predictions
-    final outputBuffer = Float32List(1 * 84 * 8400);
-    final output = outputBuffer.reshape([1, 84, 8400]);
-
-    // Run inference
     interpreter.run(input, output);
 
-    // Convert to List<List<List<double>>> for downstream use
     final result = <List<List<double>>>[];
     for (final batch in output) {
       final rows = <List<double>>[];
@@ -167,7 +224,7 @@ class TensorflowHelper {
     return [result[0]];
   }
 
-  /// Sigmoid activation function for converting logits to probabilities
+  /// Sigmoid activation function
   static double _sigmoid(double x) {
     return 1.0 / (1.0 + exp(-x));
   }
@@ -183,7 +240,7 @@ class TensorflowHelper {
     final data = output[0]; // Shape: [84, 8400]
     final detections = <Map<String, dynamic>>[];
 
-    // ── Determine sigmoid need once, cache for all subsequent frames ──
+    // Determine sigmoid need once, cache for all subsequent frames
     if (_cachedUseSigmoid == null) {
       bool foundOutOfRange = false;
       for (int i = 0; i < min(100, 8400) && !foundOutOfRange; i++) {
@@ -199,19 +256,13 @@ class TensorflowHelper {
     }
     final bool useSigmoid = _cachedUseSigmoid!;
 
-    // Pre-compute raw-score threshold for early exit.
-    // Since sigmoid is monotonically increasing:
-    //   sigmoid(x) >= threshold  ⟺  x >= ln(threshold / (1 - threshold))
-    final double rawThreshold = useSigmoid
-        ? log(confidenceThreshold / (1.0 - confidenceThreshold))
-        : confidenceThreshold;
+    // Pre-filter using the lowest possible effective threshold so no hazard
+    // class candidate is discarded before we read its label.
+    final double rawPreFilter = useSigmoid
+        ? log(_minEffectiveThreshold / (1.0 - _minEffectiveThreshold))
+        : _minEffectiveThreshold;
 
-    // Parse all 8400 predictions
     for (int i = 0; i < 8400; i++) {
-      // ── KEY OPTIMISATION ──
-      // sigmoid is monotonically increasing, so argmax(raw) == argmax(sigmoid(raw)).
-      // Find max RAW score first, then apply sigmoid ONLY to the winner.
-      // Saves 79 sigmoid calls per prediction (80 → 1).
       double maxRaw = -double.infinity;
       int bestClass = 0;
 
@@ -223,34 +274,30 @@ class TensorflowHelper {
         }
       }
 
-      // Early exit on raw score — avoids sigmoid call for ~99% of predictions
-      if (maxRaw < rawThreshold) continue;
+      if (maxRaw < rawPreFilter) continue;
 
       final double maxScore = useSigmoid ? _sigmoid(maxRaw) : maxRaw;
-      if (maxScore < confidenceThreshold) continue;
 
-      // Detection passes threshold
+      // Apply class-specific threshold: hazard classes use a lower bar,
+      // everything else uses the general confidenceThreshold.
+      final labelName = bestClass < labels.length ? labels[bestClass] : '';
+      final double effectiveThreshold =
+          _hazardThresholds[labelName] ?? confidenceThreshold;
+      if (maxScore < effectiveThreshold) continue;
+
       {
-        // YOLOv8 TFLite outputs bbox coords in NORMALIZED 0-1 range
-        // Multiply by 640 to get letterbox-space pixels, then
-        // remove letterbox padding and undo scale to get original-image coords.
         final cx = data[0][i] * 640;
         final cy = data[1][i] * 640;
         final w  = data[2][i] * 640;
         final h  = data[3][i] * 640;
 
-        // Remove letterbox padding and remap to 0-640 range
-        // so that renderLocation (which divides by 640) works correctly.
-        // Content occupies [padX .. padX+newW] × [padY .. padY+newH] in
-        // the 640×640 letterbox. We remap that region to [0..640].
-        final contentW = 640.0 - 2 * padX; // == newW
-        final contentH = 640.0 - 2 * padY; // == newH
+        final contentW = 640.0 - 2 * padX;
+        final contentH = 640.0 - 2 * padY;
         final remapCx = (cx - padX) / contentW * 640;
         final remapCy = (cy - padY) / contentH * 640;
         final remapW  = w / contentW * 640;
         final remapH  = h / contentH * 640;
 
-        // Convert center coords to corner coords and clamp to 0-640
         final x1 = (remapCx - remapW / 2).clamp(0.0, 640.0);
         final y1 = (remapCy - remapH / 2).clamp(0.0, 640.0);
         final x2 = (remapCx + remapW / 2).clamp(0.0, 640.0);
@@ -263,15 +310,13 @@ class TensorflowHelper {
           'y2': y2,
           'class': bestClass,
           'confidence': maxScore,
-          'label': bestClass < labels.length ? labels[bestClass] : '???',
+          'label': labelName.isEmpty ? '???' : labelName,
         });
       }
     }
 
-    // Apply Non-Maximum Suppression
     final nmsDetections = _applyNMS(detections, iouThreshold);
 
-    // Convert to DetectedObjectDm list
     return nmsDetections.map((det) {
       return DetectedObjectDm(
         label: det['label'] as String,
@@ -290,7 +335,6 @@ class TensorflowHelper {
     List<Map<String, dynamic>> detections,
     double iouThreshold,
   ) {
-    // Sort by confidence (highest first)
     detections.sort((a, b) =>
         (b['confidence'] as double).compareTo(a['confidence'] as double));
 
@@ -300,7 +344,6 @@ class TensorflowHelper {
       final best = detections.removeAt(0);
       keep.add(best);
 
-      // Remove overlapping boxes
       detections.removeWhere((det) {
         final iou = _calculateIoU(best, det);
         return iou > iouThreshold;
