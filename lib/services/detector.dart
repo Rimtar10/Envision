@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:isolate';
 
 import 'package:camera/camera.dart';
@@ -23,35 +23,73 @@ class _Command {
   final List<Object>? args;
 }
 
-/// A Simple Detector that handles object detection via Service
-///
-/// All the heavy operations like pre-processing, detection, ets,
-/// are executed in a background isolate.
-/// This class just sends and receives messages to the isolate.
+/// Snapshot of live detection performance, published on [Detector.perf].
+class PerfStats {
+  const PerfStats({
+    required this.fps,
+    required this.lastInferenceMs,
+    required this.avgInferenceMs,
+    required this.detections,
+  });
+
+  /// Frames processed per second (rolling average over recent frames).
+  final double fps;
+
+  /// End-to-end processing time of the most recent frame, in milliseconds
+  /// (camera-image conversion + rotation + inference + post-processing).
+  final double lastInferenceMs;
+
+  /// Rolling-average processing time over recent frames, in milliseconds.
+  final double avgInferenceMs;
+
+  /// Number of objects detected in the most recent frame.
+  final int detections;
+
+  static const zero = PerfStats(
+    fps: 0, lastInferenceMs: 0, avgInferenceMs: 0, detections: 0);
+}
+
+/// Runs object detection using two YOLOv8 models in a background isolate:
+///   1. COCO model     — 80 everyday classes (person, car, chair, etc.)
+///   2. Accessibility  — 3 classes (Door, Stair, Window)
+/// Results from both models are merged before being emitted on [resultsStream].
 class Detector {
-  Detector._(this._isolate, this._interpreter, this._labels, this._sensorOrientation);
+  Detector._(
+    this._isolate,
+    this._cocoInterpreter,
+    this._cocoLabels,
+    this._accInterpreter,
+    this._accLabels,
+    this._sensorOrientation,
+  );
 
   final Isolate _isolate;
-  late final Interpreter _interpreter;
-  late final List<String> _labels;
+  late final Interpreter _cocoInterpreter;
+  late final List<String> _cocoLabels;
+  late final Interpreter _accInterpreter;
+  late final List<String> _accLabels;
   final int _sensorOrientation;
 
-  // To be used by detector (from UI) to send message to our Service ReceivePort
   late final SendPort _sendPort;
-
   bool _isReady = false;
 
+  // ── Performance telemetry ─────────────────────────────────────────────────
+  /// Live FPS / latency, updated on every result. Bind a ValueListenableBuilder
+  /// to this to show an on-screen overlay.
+  final ValueNotifier<PerfStats> perf = ValueNotifier<PerfStats>(PerfStats.zero);
+  final List<double> _recentInferenceMs = [];
+  final List<double> _recentIntervalsMs = [];
+  DateTime? _lastResultTime;
+  bool _perfCsvHeaderPrinted = false;
+
   // ── Frame throttle ────────────────────────────────────────────────────────
-  // Camera delivers ~30 fps; detection doesn't need more than ~12 fps.
-  // Throttling reduces isolate message overhead and CPU heat without any
-  // perceptible lag for the user.
   DateTime _lastFrameTime = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _minFrameInterval = Duration(milliseconds: 80);
+  // 80 ms hard-capped throughput at 12.5 FPS no matter how fast the models
+  // got. 50 ms allows up to 20 FPS while still dropping frames the isolate
+  // cannot keep up with (the busy/ready handshake does the real backpressure).
+  static const Duration _minFrameInterval = Duration(milliseconds: 50);
 
   // ── Stability filter ─────────────────────────────────────────────────────
-  // A detection is only emitted if the same label was also seen in the
-  // previous frame. Eliminates single-frame phantom detections (false positives
-  // that flicker in for one frame). Latency cost: just one frame (~80 ms).
   List<DetectedObjectDm> _previousResults = [];
 
   final StreamController<List<DetectedObjectDm>> _resultsStreamController =
@@ -60,10 +98,9 @@ class Detector {
   Stream<List<DetectedObjectDm>> get resultsStream =>
       _resultsStreamController.stream;
 
-  /// Launch the server on a background isolate..
+  /// Launch the server on a background isolate.
   static Future<Detector> start({int sensorOrientation = 90}) async {
     final ReceivePort receivePort = ReceivePort();
-    // sendPort - To be used by service Isolate to send message to our ReceiverPort
     final Isolate isolate =
         await Isolate.spawn(_DetectorServer._run, receivePort.sendPort);
 
@@ -71,12 +108,14 @@ class Detector {
       isolate,
       TensorflowService.ssdMobileNet.interpreter,
       TensorflowService.ssdMobileNet.labels,
+      TensorflowService.accessibilityModel.interpreter,
+      TensorflowService.accessibilityModel.labels,
       sensorOrientation,
     );
     receivePort.listen((message) {
       result._handleCommand(message as _Command);
     });
-    if (_enableDebugLogs) debugPrint('[Detector] Detector.start() complete, waiting for handshake...');
+    if (_enableDebugLogs) debugPrint('[Detector] start() complete, waiting for handshake...');
     return result;
   }
 
@@ -92,23 +131,17 @@ class Detector {
     }
   }
 
-  /// Handler invoked when a message is received from the port communicating
-  /// with the database server.
   void _handleCommand(_Command command) {
     switch (command.processType) {
       case TensorflowProcessType.init:
         _sendPort = command.args?[0] as SendPort;
-        // ----------------------------------------------------------------------
-        // Before using platform channels and plugins from background isolates we
-        // need to register it with its root isolate. This is achieved by
-        // acquiring a [RootIsolateToken] which the background isolate uses to
-        // invoke [BackgroundIsolateBinaryMessenger.ensureInitialized].
-        // ----------------------------------------------------------------------
         RootIsolateToken rootIsolateToken = RootIsolateToken.instance!;
         _sendPort.send(_Command(TensorflowProcessType.init, args: [
           rootIsolateToken,
-          _interpreter.address,
-          _labels,
+          _cocoInterpreter.address,
+          _cocoLabels,
+          _accInterpreter.address,
+          _accLabels,
           _sensorOrientation,
         ]));
       case TensorflowProcessType.ready:
@@ -120,53 +153,141 @@ class Detector {
         _isReady = true;
         if (!_resultsStreamController.isClosed) {
           final rawResults = command.args?[0] as List<DetectedObjectDm>;
-          final stableResults = _stabilize(rawResults);
-          _previousResults = rawResults;
-          if (_enableDebugLogs) {
-            debugPrint('[Detector] raw=${rawResults.length} stable=${stableResults.length}');
-          }
-          _resultsStreamController.add(stableResults);
+          final stabilized = _stabilize(rawResults);
+          _previousResults = stabilized;
+          if (_enableDebugLogs) debugPrint('[Detector] Got ${stabilized.length} detections');
+          _resultsStreamController.add(stabilized);
+          final inferenceMs = (command.args != null && command.args!.length > 1)
+              ? (command.args![1] as num).toDouble()
+              : 0.0;
+          _updatePerf(inferenceMs, stabilized.length);
         }
       default:
         if (_enableDebugLogs) debugPrint('Detector unrecognized command: ${command.processType}');
     }
   }
 
-  /// Keeps only detections whose label was also present in the previous frame.
-  /// If ALL detections are brand-new (first appearance), passes them through
-  /// so the screen doesn't blank out when a new object enters the frame.
+  /// Updates the rolling FPS / latency stats and emits a CSV telemetry line.
+  ///
+  /// To capture a session for offline graphing, run:
+  ///   flutter run | tee perf_log.txt
+  /// then feed perf_log.txt to metrics/runtime_report.py.
+  void _updatePerf(double inferenceMs, int detections) {
+    final now = DateTime.now();
+
+    if (_lastResultTime != null) {
+      final dtMs = now.difference(_lastResultTime!).inMicroseconds / 1000.0;
+      if (dtMs > 0) {
+        _recentIntervalsMs.add(dtMs);
+        if (_recentIntervalsMs.length > 30) _recentIntervalsMs.removeAt(0);
+      }
+    }
+    _lastResultTime = now;
+
+    _recentInferenceMs.add(inferenceMs);
+    if (_recentInferenceMs.length > 30) _recentInferenceMs.removeAt(0);
+
+    final avgMs = _recentInferenceMs.isEmpty
+        ? 0.0
+        : _recentInferenceMs.reduce((a, b) => a + b) / _recentInferenceMs.length;
+    final avgInterval = _recentIntervalsMs.isEmpty
+        ? 0.0
+        : _recentIntervalsMs.reduce((a, b) => a + b) / _recentIntervalsMs.length;
+    final fps = avgInterval > 0 ? 1000.0 / avgInterval : 0.0;
+
+    perf.value = PerfStats(
+      fps: fps,
+      lastInferenceMs: inferenceMs,
+      avgInferenceMs: avgMs,
+      detections: detections,
+    );
+
+    // Use print (not debugPrint) for telemetry: debugPrint rate-limits output
+    // to ~1 KB/s and would DROP rows once the frame rate climbs in a
+    // release/profile build, corrupting the runtime graphs.
+    if (!_perfCsvHeaderPrinted) {
+      // ignore: avoid_print
+      print('PERF_CSV,timestamp_ms,inference_ms,fps,detections');
+      _perfCsvHeaderPrinted = true;
+    }
+    // ignore: avoid_print
+    print('PERF_CSV,${now.millisecondsSinceEpoch},'
+        '${inferenceMs.toStringAsFixed(1)},${fps.toStringAsFixed(2)},$detections');
+  }
+
+  /// Classes where a one-frame delay is not acceptable. Mirrors
+  /// VoiceService._hazardClasses; keep the two in sync.
+  static const Set<String> _hazardClasses = {
+    'person', 'car', 'truck', 'bus', 'motorcycle', 'bicycle',
+    'dog', 'fire hydrant', 'stop sign', 'traffic light', 'stair',
+  };
+
+  /// Suppresses one-frame flicker by requiring a label to persist across two
+  /// consecutive frames — EXCEPT for hazard classes, which are always passed
+  /// through immediately.
+  ///
+  /// The old version filtered every class, so a car that appeared suddenly was
+  /// discarded on its first frame: ~100 ms of extra latency on exactly the
+  /// events that matter most.
   List<DetectedObjectDm> _stabilize(List<DetectedObjectDm> current) {
     if (_previousResults.isEmpty) return current;
     final prevLabels = _previousResults.map((d) => d.label).toSet();
-    final stable = current.where((d) => prevLabels.contains(d.label)).toList();
-    // Fall back to raw list so the first frame of a new object isn't skipped
+    final stable = current
+        .where((d) =>
+            _hazardClasses.contains(d.label.toLowerCase()) ||
+            prevLabels.contains(d.label))
+        .toList();
     return stable.isEmpty ? current : stable;
   }
 
   /// Kills the background isolate and its detector server.
+  ///
+  /// `perf` is deliberately NOT disposed here: the screen nulls its `_detector`
+  /// reference without an immediate setState, so a ValueListenableBuilder can
+  /// still be mounted against this notifier for one more frame. Disposing it
+  /// here risked a "used after dispose" crash on app resume. The notifier is a
+  /// few bytes and dies with the Detector instance.
   void stop() {
-    _resultsStreamController.close();
-    _isolate.kill();
+    if (!_resultsStreamController.isClosed) _resultsStreamController.close();
+    _isolate.kill(priority: Isolate.immediate);
   }
 }
 
 /// The portion of the [Detector] that runs on the background isolate.
-///
-/// This is where we use the new feature Background Isolate Channels, which
-/// allows us to use plugins from background isolates.
 class _DetectorServer {
   _DetectorServer(this._sendPort);
 
-  Interpreter? _interpreter;
-  List<String>? _labels;
+  Interpreter? _cocoInterpreter;
+  List<String>? _cocoLabels;
+  ModelGeometry? _cocoGeometry;
+  Interpreter? _accInterpreter;
+  List<String>? _accLabels;
+  ModelGeometry? _accGeometry;
   int _sensorOrientation = 90;
   final SendPort _sendPort;
 
-  // ----------------------------------------------------------------------
-  // Here the plugin is used from the background isolate.
-  // ----------------------------------------------------------------------
+  // ── Model scheduling ──────────────────────────────────────────────────────
+  // Running BOTH models on every frame meant two full 640×640 inferences per
+  // frame — the original lag. Instead we run the COCO model EVERY frame (it
+  // drives the responsive everyday classes: person, chair, car) and the lighter
+  // accessibility model only every Nth frame (doors/stairs are static enough to
+  // tolerate a lower refresh). Each emit merges the freshest result of each.
+  //
+  // UPDATE: with the accessibility model at float16 this drops from 6 to 2, and
+  // once it is retrained as YOLO11n (metrics/train_accessibility.py) set it to
+  // 1 so stairs — the most safety-critical class — refresh every frame.
+  // For a blind pedestrian, refresh rate on Stair is worth more than the 2-4
+  // mAP points the smaller backbone costs.
+  static const int _accEveryNFrames = 2;
+  int _frameCount = 0;
+  List<DetectedObjectDm> _lastCoco = const [];
+  List<DetectedObjectDm> _lastAcc = const [];
 
-  /// The main entrypoint for the background isolate sent to [Isolate.spawn].
+  // v2 accessibility model has exactly 3 trained classes (Door, Stair, Window),
+  // so there are no untrained phantom channels left to filter. Kept as an empty
+  // set so the merge code below stays unchanged.
+  static const Set<String> _untrainedAccClasses = {};
+
   static void _run(SendPort sendPort) {
     ReceivePort receivePort = ReceivePort();
     final _DetectorServer server = _DetectorServer(sendPort);
@@ -174,99 +295,96 @@ class _DetectorServer {
       final _Command command = message as _Command;
       await server._handleCommand(command);
     });
-    // receivePort.sendPort - used by UI isolate to send commands to the service receiverPort
     sendPort.send(
         _Command(TensorflowProcessType.init, args: [receivePort.sendPort]));
   }
 
-  /// Handle the [command] received from the [ReceivePort].
   Future<void> _handleCommand(_Command command) async {
     switch (command.processType) {
       case TensorflowProcessType.init:
-        // ----------------------------------------------------------------------
-        // The [RootIsolateToken] is required for
-        // [BackgroundIsolateBinaryMessenger.ensureInitialized] and must be
-        // obtained on the root isolate and passed into the background isolate via
-        // a [SendPort].
-        // ----------------------------------------------------------------------
         RootIsolateToken rootIsolateToken =
             command.args?[0] as RootIsolateToken;
-        // ----------------------------------------------------------------------
-        // [BackgroundIsolateBinaryMessenger.ensureInitialized] for each
-        // background isolate that will use plugins. This sets up the
-        // [BinaryMessenger] that the Platform Channels will communicate with on
-        // the background isolate.
-        // ----------------------------------------------------------------------
         BackgroundIsolateBinaryMessenger.ensureInitialized(rootIsolateToken);
-        _interpreter = Interpreter.fromAddress(command.args?[1] as int);
-        _labels = command.args?[2] as List<String>;
-        _sensorOrientation = command.args?[3] as int? ?? 90;
+        _cocoInterpreter = Interpreter.fromAddress(command.args?[1] as int);
+        _cocoLabels     = command.args?[2] as List<String>;
+        _accInterpreter = Interpreter.fromAddress(command.args?[3] as int);
+        _accLabels      = command.args?[4] as List<String>;
+        // Read input size / class count / anchor count from the models
+        // themselves so a re-export at another imgsz needs no code change.
+        _cocoGeometry = ModelGeometry.fromInterpreter(_cocoInterpreter!);
+        _accGeometry  = ModelGeometry.fromInterpreter(_accInterpreter!);
+        _sensorOrientation = command.args?[5] as int? ?? 90;
         _sendPort.send(const _Command(TensorflowProcessType.ready));
       case TensorflowProcessType.detect:
         _sendPort.send(const _Command(TensorflowProcessType.busy));
         _convertCameraImage(command.args?[0] as CameraImage);
       default:
-        debugPrint(
-            '_DetectorService unrecognized command ${command.processType}');
+        debugPrint('_DetectorService unrecognized command ${command.processType}');
     }
   }
 
-  // Convert Camera Image to Image and run detection.
   void _convertCameraImage(CameraImage cameraImage) {
+    final sw = Stopwatch()..start();
     try {
-      // Convert YUV/NV21/BGRA to RGB image
       var image = ImageUtils.convertCameraImageToImage(cameraImage);
       if (image == null) {
         _sendPort.send(_Command(TensorflowProcessType.result,
-            args: [<DetectedObjectDm>[]]));
+            args: [<DetectedObjectDm>[], 0]));
         return;
       }
 
-      if (_enableDebugLogs) debugPrint('[DetectorServer] Image converted: ${image.width}x${image.height}');
-
-      // Rotate to match display orientation.
-      // Android camera sensors produce landscape frames; sensorOrientation
-      // tells us how many degrees CW to rotate for correct portrait display.
       if (_sensorOrientation != 0) {
         image = copyRotate(image, angle: _sensorOrientation);
-        if (_enableDebugLogs) debugPrint('[DetectorServer] Rotated ${_sensorOrientation}Â°: ${image.width}x${image.height}');
       }
 
       final results = _analyseImageCamera(image);
-
-      _sendPort.send(_Command(TensorflowProcessType.result, args: [results]));
+      sw.stop();
+      // Second arg = full per-frame processing time in ms (telemetry).
+      _sendPort.send(
+          _Command(TensorflowProcessType.result, args: [results, sw.elapsedMilliseconds]));
     } catch (e, s) {
-      if (_enableDebugLogs) debugPrint('[DetectorServer] ERROR in _convertCameraImage: $e');
-      if (_enableDebugLogs) debugPrint('[DetectorServer] Stacktrace: $s');
-      // Always send result to restore _isReady
+      if (_enableDebugLogs) debugPrint('[DetectorServer] ERROR: $e\n$s');
       _sendPort.send(_Command(TensorflowProcessType.result,
-          args: [<DetectedObjectDm>[]]));
+          args: [<DetectedObjectDm>[], 0]));
     }
   }
 
-  /// Run YOLOv8 inference on a camera frame.
-  ///
-  /// Uses stretch resize (no letterbox) so output bbox coords are
-  /// in 640x640 space which maps directly to the camera preview
-  /// via [DetectedObjectDm.renderLocation].
+  /// Runs the COCO model every frame and the accessibility model every Nth
+  /// frame, merging the freshest result of each. COCO at full rate keeps people
+  /// / chairs / cars responsive; doors and stairs refresh a little slower.
   List<DetectedObjectDm> _analyseImageCamera(Image image) {
-    if (_interpreter == null) {
-      if (_enableDebugLogs) debugPrint('[DetectorServer] _interpreter is null!');
-      return [];
+    // ── COCO model (nc=80) — every frame ──────────────────────────────────
+    if (_cocoInterpreter != null) {
+      _lastCoco = TensorflowHelper.analyseImage(
+        image,
+        interpreter: _cocoInterpreter!,
+        label: _cocoLabels ?? [],
+        geometry: _cocoGeometry!,
+        confidenceThreshold: 0.40,
+        iouThreshold: 0.50,
+        drawObjectOnImage: false,
+        returnDetectedImage: false,
+      ).detectedObjects;
     }
 
-    final result = TensorflowHelper.analyseImage(
-      image,
-      interpreter: _interpreter!,
-      label: _labels ?? [],
-      drawObjectOnImage: false,
-      returnDetectedImage: false,
-      // letterbox=true (default) — preserves aspect ratio for better accuracy
-    );
+    // ── Accessibility model (nc=3: Door, Stair, Window) — every Nth frame ──
+    if (_accInterpreter != null && (_frameCount++ % _accEveryNFrames) == 0) {
+      final acc = TensorflowHelper.analyseImage(
+        image,
+        interpreter: _accInterpreter!,
+        label: _accLabels ?? [],
+        geometry: _accGeometry!,
+        confidenceThreshold: 0.45,
+        iouThreshold: 0.50,
+        drawObjectOnImage: false,
+        returnDetectedImage: false,
+      ).detectedObjects;
+      // v2 has no untrained channels, so this filter is a pass-through now.
+      _lastAcc = acc
+          .where((d) => !_untrainedAccClasses.contains(d.label))
+          .toList(growable: false);
+    }
 
-    return result.detectedObjects;
+    return [..._lastCoco, ..._lastAcc];
   }
 }
-
-
-

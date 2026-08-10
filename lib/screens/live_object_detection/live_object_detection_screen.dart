@@ -184,6 +184,39 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                         ),
                       ),
 
+                    // ── Performance overlay (top-center) ────────────────
+                    if (_detector != null)
+                      Positioned(
+                        top: 10,
+                        left: 0,
+                        right: 0,
+                        child: Center(
+                          child: ValueListenableBuilder<PerfStats>(
+                            valueListenable: _detector!.perf,
+                            builder: (context, p, _) {
+                              return Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 10, vertical: 5),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withValues(alpha: 0.6),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Text(
+                                  '${p.fps.toStringAsFixed(1)} FPS  •  '
+                                  '${p.lastInferenceMs.toStringAsFixed(0)} ms  •  '
+                                  '${p.detections} obj',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
+
                     // ── Voice status banner (bottom of camera area) ─────
                     if (_voiceStatus.isNotEmpty)
                       Positioned(
@@ -470,7 +503,11 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   @override
   void dispose() {
     _appLifecycleListener.dispose();
+    try {
+      _cameraController?.stopImageStream();
+    } catch (_) {}
     _cameraController?.dispose();
+    _cameraController = null;
     _objectDetectorStream?.cancel();
     _objectDetectorStream = null;
     _detector?.stop();
@@ -492,6 +529,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
       try {
         await TensorflowService.ssdMobileNet.ensureInitialized();
+        await TensorflowService.accessibilityModel.ensureInitialized();
         modelReady = true;
       } catch (e) {
         message = 'Model failed to load: $e';
@@ -535,9 +573,16 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
         VoiceService.instance.speakWelcome();
       }
 
-      if (voiceReady && !_wakeWordEnabled) {
-        await VoiceService.instance.setWakeWordEnabled(true);
-        if (mounted) setState(() => _wakeWordEnabled = true);
+      // Wake word is deliberately OFF by default.
+      //
+      // The poller keeps an Android SpeechRecognizer session open almost
+      // continuously, which (a) competes with obstacle announcements for the
+      // mic, (b) streams ambient audio to a cloud ASR, and (c) drains battery.
+      // The user enables it from the 'Wake: OFF' button when they want it.
+      // Replace the polling loop with an on-device wake-word engine
+      // (Porcupine / openWakeWord) before considering enabling this by default.
+      if (voiceReady) {
+        if (mounted) setState(() => _wakeWordEnabled = false);
       }
     } finally {
       _isInitializing = false;
@@ -599,7 +644,9 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     cameraIndex = 0;
     _cameraController = CameraController(
       cameras[cameraIndex],
-      ResolutionPreset.low, // Tab A7 can't hold PREVIEW+STILL+YUV all at medium
+      ResolutionPreset.medium, // balance: sharper than low, far cheaper than high; the model still
+      // letterboxes to 640 so detection is unchanged. Drop to .medium/.low if a
+      // low-end device (e.g. Galaxy Tab A7) can't hold preview+stream at high.
       enableAudio: false,
     );
     try {
@@ -640,7 +687,9 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     _cameraController?.dispose();
     _cameraController = CameraController(
       cameras[cameraIndex],
-      ResolutionPreset.low, // Tab A7 can't hold PREVIEW+STILL+YUV all at medium
+      ResolutionPreset.medium, // balance: sharper than low, far cheaper than high; the model still
+      // letterboxes to 640 so detection is unchanged. Drop to .medium/.low if a
+      // low-end device (e.g. Galaxy Tab A7) can't hold preview+stream at high.
       enableAudio: false,
     )..initialize().then((_) async {
         await _cameraController?.startImageStream(onLatestImageAvailable);
@@ -675,6 +724,9 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   }
 
   void onLatestImageAvailable(CameraImage cameraImage) {
+    if (!mounted) return;
+    final controller = _cameraController;
+    if (controller == null || !controller.value.isInitialized) return;
     _detector?.processFrame(cameraImage);
   }
 }

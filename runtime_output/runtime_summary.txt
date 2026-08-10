@@ -1,0 +1,16 @@
+ENVISION — LIVE RUNTIME PERFORMANCE
+======================================
+
+Frames analysed     : 44
+
+Per-frame latency (ms):
+  mean    : 2005.4
+  median  : 1739.0
+  p95     : 3137.4
+  min/max : 1445.0 / 3233.0
+
+Throughput (FPS):
+  mean    : 0.5
+  median  : 0.5
+
+Avg objects / frame : 1.3

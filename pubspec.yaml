@@ -1,5 +1,5 @@
 name: tensorflow_demo
-description: "A new Flutter project."
+description: "Envision — real-time object, door and stair detection with spoken guidance for blind and low-vision users."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -79,11 +79,17 @@ flutter:
   uses-material-design: true
 
   # To add assets to your application, add an assets section, like this:
+  # Only the models the app ACTUALLY loads are bundled. Listing every
+  # candidate here shipped ~110 MB of assets to users when 29 MB were in use:
+  # yolov8n (12.3), yolo11s (36.3), accessibility_v2 float32 (36.2),
+  # accessibility v1 (5.9), unified (36.2) and ssd_mobilenet (4.2) were all
+  # dead weight. They still exist on disk for rollback and ablation — they are
+  # simply not packaged. Re-add a line here to ship one.
   assets:
-    - assets/yolov8n_float32.tflite
+    - assets/yolo11n_float32.tflite          # COCO, 80 classes
     - assets/coco_labels.txt
-    - assets/model/
-    - assets/label/
+    - assets/accessibility_v2_float16.tflite # Door / Stair / Window
+    - assets/accessibility_v2_labels.txt
     - assets/vectors/
   #  - images/a_dot_ham.jpeg
 

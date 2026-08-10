@@ -1,0 +1,86 @@
+class,val_instances,mAP50_95
+person,0,0.5323
+bicycle,0,0.2613
+car,0,0.1622
+motorcycle,0,0.7172
+airplane,0,0.6723
+bus,0,0.6887
+train,0,0.6013
+truck,0,0.2932
+boat,0,0.1337
+traffic light,0,0.1358
+fire hydrant,0,
+stop sign,0,0.7000
+parking meter,0,
+bench,0,0.3636
+bird,0,0.5085
+cat,0,0.7894
+dog,0,0.5838
+horse,0,0.5178
+sheep,0,
+cow,0,
+elephant,0,0.6748
+bear,0,0.9950
+zebra,0,0.9637
+giraffe,0,0.7174
+backpack,0,0.2315
+umbrella,0,0.4156
+handbag,0,0.0858
+tie,0,0.4730
+suitcase,0,0.5200
+frisbee,0,0.6750
+skis,0,0.4975
+snowboard,0,0.4986
+sports ball,0,0.3110
+kite,0,0.1774
+baseball bat,0,0.1979
+baseball glove,0,0.2702
+skateboard,0,0.4062
+surfboard,0,
+tennis racket,0,0.3127
+bottle,0,0.2031
+wine glass,0,0.3276
+cup,0,0.2776
+fork,0,0.1818
+knife,0,0.3677
+spoon,0,0.1859
+bowl,0,0.4921
+banana,0,0.0438
+apple,0,
+sandwich,0,0.3317
+orange,0,0.6215
+broccoli,0,0.2005
+carrot,0,0.3583
+hot dog,0,0.7200
+pizza,0,0.8413
+donut,0,0.8626
+cake,0,0.8785
+chair,0,0.2369
+couch,0,0.5456
+potted plant,0,0.4840
+bed,0,0.6161
+dining table,0,0.3668
+toilet,0,0.6750
+tv,0,0.6950
+laptop,0,0.3611
+mouse,0,0.0045
+remote,0,0.5300
+keyboard,0,
+cell phone,0,0.0334
+microwave,0,0.7169
+oven,0,0.2666
+toaster,0,
+sink,0,0.1255
+refrigerator,0,0.4383
+book,0,0.1846
+clock,0,0.7374
+vase,0,0.7950
+scissors,0,0.0746
+teddy bear,0,0.3876
+hair drier,0,
+toothbrush,0,0.3718
+
+overall_precision,0.6385
+overall_recall,0.5361
+overall_mAP50,0.6054
+overall_mAP50_95,0.4454

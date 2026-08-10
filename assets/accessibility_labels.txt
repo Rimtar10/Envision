@@ -1,0 +1,5 @@
+Door
+Gate
+Stair
+Window
+Building
