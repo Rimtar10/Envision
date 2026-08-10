@@ -1,7 +1,6 @@
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'dart:async';
-import 'dart:ui';
 import 'package:flutter/services.dart';
 import 'package:tensorflow_demo/models/detected_object/detected_object_dm.dart';
 import 'package:battery_plus/battery_plus.dart';
@@ -19,6 +18,7 @@ class VoiceService {
 
   // ── Cooldown tracking ────────────────────────────────────────────────────
   final Map<String, DateTime> _lastAnnounced = {};
+
   /// Global floor: no detection announcement fires sooner than this after the last one.
   DateTime? _lastAnnouncementTime;
   static const _minAnnouncementInterval = Duration(seconds: 3);
@@ -26,12 +26,14 @@ class VoiceService {
   // ── Hazard-interrupt tracking ────────────────────────────────────────────
   /// Distance (metres) of the most recently announced object.
   double? _lastAnnouncedDistance;
+
   /// Guards against back-to-back hazard overrides (max one every 2 s).
   DateTime? _lastHazardOverrideTime;
 
   // ── Path-clear tracking ───────────────────────────────────────────────────
   /// True once we've said "path seems clear" so we don't repeat it.
   bool _pathClearAnnounced = false;
+
   /// Last time any detection was seen (used for path-clear timing).
   DateTime? _lastDetectionTime;
 
@@ -54,6 +56,7 @@ class VoiceService {
   // ── Callbacks ────────────────────────────────────────────────────────────
   void Function(bool isListening)? onListeningStateChanged;
   void Function()? onWakeWordDetected;
+
   /// Called with a human-readable summary of the last heard command (for UI display)
   void Function(String text)? onCommandHeard;
 
@@ -78,8 +81,16 @@ class VoiceService {
   /// These get lower confidence thresholds AND are always sorted to the front
   /// of the announcement queue.
   static const Set<String> _hazardClasses = {
-    'person', 'car', 'truck', 'bus', 'motorcycle', 'bicycle',
-    'dog', 'fire hydrant', 'stop sign', 'traffic light',
+    'person',
+    'car',
+    'truck',
+    'bus',
+    'motorcycle',
+    'bicycle',
+    'dog',
+    'fire hydrant',
+    'stop sign',
+    'traffic light',
   };
 
   // ── Object real-world heights (metres) ──────────────────────────────────
@@ -118,7 +129,7 @@ class VoiceService {
     'clock': 0.3,
     'refrigerator': 1.7,
     'door': 2.0,
-    'stairs': 0.2,   // riser height
+    'stairs': 0.2, // riser height
     'curb': 0.15,
     'keyboard': 0.05,
     'mouse': 0.04,
@@ -222,12 +233,12 @@ class VoiceService {
     // ── Hazard override ───────────────────────────────────────────────────
     // If TTS is mid-sentence but a significantly closer hazard just appeared
     // (35% nearer, under 2 m, max one override every 2 s) — cut the speech.
-    final hazardOverride = _isSpeaking
-        && meters > 0
-        && meters < 2.0
-        && _lastAnnouncedDistance != null
-        && meters < _lastAnnouncedDistance! * 0.65
-        && (_lastHazardOverrideTime == null ||
+    final hazardOverride = _isSpeaking &&
+        meters > 0 &&
+        meters < 2.0 &&
+        _lastAnnouncedDistance != null &&
+        meters < _lastAnnouncedDistance! * 0.65 &&
+        (_lastHazardOverrideTime == null ||
             now.difference(_lastHazardOverrideTime!) >
                 const Duration(seconds: 2));
 
@@ -383,10 +394,10 @@ class VoiceService {
   /// between repeats — the global _minAnnouncementInterval handles fast firing.
   int _dynamicCooldown(double meters) {
     if (meters < 0) return 6;
-    if (meters < 0.8) return 3;   // very close  — re-announce every 3 s
-    if (meters < 2.0) return 4;   // close        — every 4 s
-    if (meters < 4.0) return 6;   // ahead        — every 6 s
-    return 9;                      // far           — every 9 s
+    if (meters < 0.8) return 3; // very close  — re-announce every 3 s
+    if (meters < 2.0) return 4; // close        — every 4 s
+    if (meters < 4.0) return 6; // ahead        — every 6 s
+    return 9; // far           — every 9 s
   }
 
   /// Compose the spoken phrase with capitalized label and natural word order.
@@ -394,9 +405,8 @@ class VoiceService {
   ///           "Warning! Chair right in front of you"
   ///           "Car far ahead"
   String _buildDistancePhrase(String label, double meters, String position) {
-    final cap = label.isNotEmpty
-        ? label[0].toUpperCase() + label.substring(1)
-        : label;
+    final cap =
+        label.isNotEmpty ? label[0].toUpperCase() + label.substring(1) : label;
     if (meters < 0) return '$cap, $position';
     if (meters < 0.8) return '$cap right in front of you';
     if (meters < 10.0) {
@@ -464,7 +474,10 @@ class VoiceService {
   }
 
   Future<void> _pollWakeWord() async {
-    if (!_wakeWordEnabled || _inConversation || _isSpeaking || _stt.isListening) {
+    if (!_wakeWordEnabled ||
+        _inConversation ||
+        _isSpeaking ||
+        _stt.isListening) {
       // Try again later
       _scheduleWakeWordPoll();
       return;
@@ -518,7 +531,8 @@ class VoiceService {
       if (!_isSpeaking) {
         timer.cancel();
         startListening((unrecognized) {
-          _speak("Sorry, I didn't catch that. Try saying 'help' for a list of commands.");
+          _speak(
+              "Sorry, I didn't catch that. Try saying 'help' for a list of commands.");
           onCommandHeard?.call('Unrecognized: $unrecognized');
         });
       }
@@ -581,7 +595,8 @@ class VoiceService {
   Future<void> _parseVoiceCommand(
       String command, Function(String) onUnrecognized) async {
     // ── STOP / CANCEL ────────────────────────────────────────────────────
-    if (_matchesAny(command, ['stop', 'cancel', 'quiet', 'silence', 'shut up'])) {
+    if (_matchesAny(
+        command, ['stop', 'cancel', 'quiet', 'silence', 'shut up'])) {
       await stopSpeaking();
       _speak('Stopped.');
       _lastResponse = 'Stopped';
@@ -603,8 +618,8 @@ class VoiceService {
       await tellTime();
     }
     // ── BATTERY ──────────────────────────────────────────────────────────
-    else if (_matchesAny(command,
-        ['battery', 'charge', 'battery level', 'how much battery'])) {
+    else if (_matchesAny(
+        command, ['battery', 'charge', 'battery level', 'how much battery'])) {
       await tellBattery();
     }
     // ── DATE ─────────────────────────────────────────────────────────────
@@ -634,14 +649,17 @@ class VoiceService {
       if (appName.isNotEmpty) await launchApp(appName);
     }
     // ── NAVIGATE / GO TO ─────────────────────────────────────────────────
-    else if (_matchesAny(command, ['navigate to', 'directions to', 'take me to', 'go to'])) {
+    else if (_matchesAny(
+        command, ['navigate to', 'directions to', 'take me to', 'go to'])) {
       final dest = command
-          .replaceFirst(RegExp(r'^(navigate to|directions to|take me to|go to)\s*'), '')
+          .replaceFirst(
+              RegExp(r'^(navigate to|directions to|take me to|go to)\s*'), '')
           .trim();
       await navigateTo(dest.isNotEmpty ? dest : 'your destination');
     }
     // ── SCAN STORAGE ─────────────────────────────────────────────────────
-    else if (_matchesAny(command, ['scan storage', 'find apk', 'search storage'])) {
+    else if (_matchesAny(
+        command, ['scan storage', 'find apk', 'search storage'])) {
       await scanStorageForApks();
     }
     // ── UNRECOGNIZED ─────────────────────────────────────────────────────
@@ -701,7 +719,9 @@ class VoiceService {
 
       if (dist < 0) return '$labelStr, $pos';
       if (dist < 0.8) return '$labelStr right in front of you';
-      if (dist < 10.0) return '$labelStr, ${dist.toStringAsFixed(1)} meters, $pos';
+      if (dist < 10.0) {
+        return '$labelStr, ${dist.toStringAsFixed(1)} meters, $pos';
+      }
       return '$labelStr, far ahead';
     }).join('; ');
 
@@ -711,7 +731,9 @@ class VoiceService {
   }
 
   Future<void> countObjects(String objectName) async {
-    final cleaned = objectName.replaceAll(RegExp(r'\s+(are|is|there|do you see).*'), '').trim();
+    final cleaned = objectName
+        .replaceAll(RegExp(r'\s+(are|is|there|do you see).*'), '')
+        .trim();
     final count = _currentDetections
         .where((det) => det.label.toLowerCase().contains(cleaned.toLowerCase()))
         .length;
@@ -758,7 +780,8 @@ class VoiceService {
       final battery = Battery();
       final level = await battery.batteryLevel;
       final state = await battery.batteryState;
-      final charging = state == BatteryState.charging ? ', and it is charging' : '';
+      final charging =
+          state == BatteryState.charging ? ', and it is charging' : '';
       final response = 'Battery is at $level percent$charging.';
       _speak(response);
       _lastResponse = response;
@@ -769,8 +792,7 @@ class VoiceService {
   }
 
   Future<void> _tellHelp() async {
-    const response =
-        'You can say: describe, open followed by an app name, '
+    const response = 'You can say: describe, open followed by an app name, '
         'what time is it, battery, today\'s date, '
         'how many people, navigate to a place, '
         'repeat, stop, or help.';
@@ -890,8 +912,10 @@ class VoiceService {
                   'path': e['path'] ?? ''
                 })
             .toList();
-        final top =
-            _cachedApks.take(3).map((e) => e['label'] ?? e['package']).join(', ');
+        final top = _cachedApks
+            .take(3)
+            .map((e) => e['label'] ?? e['package'])
+            .join(', ');
         _speak('Found APKs: $top.');
       } else {
         _speak('Storage scan not permitted.');
@@ -911,8 +935,8 @@ class VoiceService {
   /// Remove stale cooldown entries. Called every 10 s from the screen.
   void cleanupCooldowns() {
     final now = DateTime.now();
-    _lastAnnounced.removeWhere(
-        (key, time) => now.difference(time).inSeconds > 12);
+    _lastAnnounced
+        .removeWhere((key, time) => now.difference(time).inSeconds > 12);
     // Reset global throttle if it's been idle long enough
     if (_lastAnnouncementTime != null &&
         now.difference(_lastAnnouncementTime!) > const Duration(seconds: 12)) {

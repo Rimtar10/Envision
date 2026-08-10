@@ -1,6 +1,5 @@
 import 'dart:developer';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:image/image.dart';
 import 'package:tensorflow_demo/utils/tensorflow_helper.dart';
@@ -53,12 +52,12 @@ class TensorflowService {
   }
 
   Future<void> _loadModel() async {
-  try {
-    if (_enableDebugLogs) print('🔴 STARTING MODEL LOAD');
+    try {
+      if (_enableDebugLogs) print('🔴 STARTING MODEL LOAD');
 
-    // Use 4 threads on Android (Snapdragon/Mali multi-core), 2 elsewhere.
-    // XNNPackDelegate with numThreads gives ~2–3× speedup over single-thread.
-    final delegate = switch (defaultTargetPlatform) {
+      // Use 4 threads on Android (Snapdragon/Mali multi-core), 2 elsewhere.
+      // XNNPackDelegate with numThreads gives ~2–3× speedup over single-thread.
+      /*final delegate = switch (defaultTargetPlatform) {
       TargetPlatform.iOS => GpuDelegate(),
       TargetPlatform.android => XNNPackDelegate(
         options: XNNPackDelegateOptions(numThreads: 4),
@@ -73,31 +72,38 @@ class TensorflowService {
       options: InterpreterOptions()
         ..threads = 4          // parallelise ops not handled by the delegate
         ..addDelegate(delegate),
-    );
+    ); */
+      if (_enableDebugLogs) print('🔴 LOADING INTERPRETER FROM: $modelPath');
 
-    if (_enableDebugLogs) print('🔴 INTERPRETER LOADED SUCCESSFULLY');
+      _interpreter = await Interpreter.fromAsset(
+        modelPath,
+        options: InterpreterOptions()..threads = 4,
+      );
 
-    final inputTensors = _interpreter.getInputTensors();
-    log(
-      'Value: ${inputTensors.map((e) => e.toString()).toList()}',
-      name: 'inputTensors',
-    );
+      if (_enableDebugLogs) print('🔴 INTERPRETER LOADED SUCCESSFULLY');
 
-    final outputTensors = _interpreter.getOutputTensors();
-    log(
-      'Value: ${outputTensors.map((e) => e.toString()).toList()}',
-      name: 'outputTensors',
-    );
+      final inputTensors = _interpreter.getInputTensors();
+      log(
+        'Value: ${inputTensors.map((e) => e.toString()).toList()}',
+        name: 'inputTensors',
+      );
 
-    _interpreter.allocateTensors();
-    
-    if (_enableDebugLogs) print('🔴 MODEL LOAD COMPLETE');
-  } catch (e, stackTrace) {
-    if (_enableDebugLogs) print('🔴🔴🔴 MODEL LOAD FAILED: $e');
-    if (_enableDebugLogs) print('🔴🔴🔴 STACK TRACE: $stackTrace');
-    rethrow;
+      final outputTensors = _interpreter.getOutputTensors();
+      log(
+        'Value: ${outputTensors.map((e) => e.toString()).toList()}',
+        name: 'outputTensors',
+      );
+
+      _interpreter.allocateTensors();
+
+      if (_enableDebugLogs) print('🔴 MODEL LOAD COMPLETE');
+    } catch (e, stackTrace) {
+      if (_enableDebugLogs) print('🔴🔴🔴 MODEL LOAD FAILED: $e');
+      if (_enableDebugLogs) print('🔴🔴🔴 STACK TRACE: $stackTrace');
+      rethrow;
+    }
   }
-}
+
   Future<void> _loadLabels() async {
     final labelsRaw = await rootBundle.loadString(labelPath);
     _labels = labelsRaw.split('\n');

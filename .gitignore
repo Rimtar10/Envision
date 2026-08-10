@@ -43,3 +43,10 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+
+# Face server
+../face_server/dataset/
+../face_server/face_model.pkl
+../face_server/label_encoder.pkl
+../face_server/__pycache__/

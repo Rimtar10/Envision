@@ -229,7 +229,7 @@ class _DetectorServer {
       // tells us how many degrees CW to rotate for correct portrait display.
       if (_sensorOrientation != 0) {
         image = copyRotate(image, angle: _sensorOrientation);
-        if (_enableDebugLogs) debugPrint('[DetectorServer] Rotated ${_sensorOrientation}Â°: ${image.width}x${image.height}');
+        if (_enableDebugLogs) debugPrint('[DetectorServer] Rotated $_sensorOrientationÂ°: ${image.width}x${image.height}');
       }
 
       final results = _analyseImageCamera(image);

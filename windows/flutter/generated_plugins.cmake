@@ -4,6 +4,7 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   battery_plus
+  face_detection_tflite
   file_selector_windows
   flutter_tts
   permission_handler_windows
@@ -12,6 +13,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST
   tflite_flutter
+  tflite_flutter_custom
 )
 
 set(PLUGIN_BUNDLED_LIBRARIES)
