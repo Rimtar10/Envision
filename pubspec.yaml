@@ -86,9 +86,9 @@ flutter:
   # dead weight. They still exist on disk for rollback and ablation — they are
   # simply not packaged. Re-add a line here to ship one.
   assets:
-    - assets/yolo11n_float32.tflite          # COCO, 80 classes
+    - assets/yolo11n_320_float32.tflite          # COCO, 80 classes @ 320
     - assets/coco_labels.txt
-    - assets/accessibility_v2_float16.tflite # Door / Stair / Window
+    - assets/accessibility_v2_320_float32.tflite # Door/Stair/Window @ 320
     - assets/accessibility_v2_labels.txt
     - assets/vectors/
   #  - images/a_dot_ham.jpeg

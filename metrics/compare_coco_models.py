@@ -40,14 +40,19 @@ import numpy as np
 # ── CONFIG ───────────────────────────────────────────────────────────────────
 MODELS = ["yolov8n.pt", "yolo11n.pt"]
 
-# coco.yaml = COCO val2017, a proper HELD-OUT set (~1 GB, auto-downloads once).
+# COCO val2017 — a proper HELD-OUT set.
 #
 # This was "coco128.yaml" — the first 128 images of COCO *train2017*. Both sets
 # of weights were trained on those images, so the resulting mAP50 figures
 # (0.607 for yolov8n, 0.671 for yolo11n) were train-set scores. They are
 # inflated and cannot support a claim that one model is better than the other.
 # Anything already published from the coco128 run should be withdrawn.
-DATA = "coco.yaml"
+#
+# It is NOT "coco.yaml" either: that file's download block pulls ~27 GB
+# (train2017 19 GB + val2017 1 GB + test2017 7 GB) and test2017 is the
+# UNLABELED competition set, which cannot be validated against at all.
+# coco_val_only.yaml has no download block and points at val2017 on disk.
+DATA = os.path.join("metrics", "coco_val_only.yaml")
 OUT = os.path.join("metrics", "output", "coco_compare")
 EXPORT_TFLITE = True
 ASSETS_DIR = "assets"

@@ -21,9 +21,11 @@ subfolder of ./output/:
 Modes
 -----
 RUN_VALIDATION = True  (default): real numbers — runs model.val() on each model.
-  Needs `ultralytics`, the model file, and the dataset. The COCO model uses
-  coco128.yaml (a tiny 128-image set that auto-downloads in seconds) for a quick
-  REAL evaluation; switch its `data` to "coco.yaml" for the full COCO val2017.
+  Needs `ultralytics`, the model file, and the dataset. The accessibility
+  model validates against accessibility_dataset/ (local, ~1 min). The COCO
+  model is OPT-IN via INCLUDE_COCO and uses metrics/coco_val_only.yaml — do
+  NOT use Ultralytics' bundled coco.yaml, whose download block pulls ~27 GB
+  including the unlabeled test2017 set that cannot be validated against.
 
 If validation can't run for a model (ultralytics missing, file not found, no
 network), the script falls back to embedded numbers where it has them
@@ -59,6 +61,23 @@ import numpy as np
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 RUN_VALIDATION = True  # real numbers only — there is no fallback any more.
+
+# Validate the COCO model too? The accessibility model is the one that matters
+# for the report and takes ~1 minute on 655 local images. COCO val2017 is 5,000
+# images and takes 15-30 min. Set this False to get the accessibility numbers
+# immediately and come back to COCO later.
+INCLUDE_COCO = False
+
+# Input sizes to validate the accessibility model at, so the speed win from
+# dropping to 320 can be reported with its accuracy cost attached.
+# Set to [] to skip the sweep.
+IMGSZ_SWEEP = [320, 448, 640]
+
+# NEVER point this at Ultralytics' bundled "coco.yaml": its download block
+# fetches ~27 GB (train2017 19 GB + val2017 1 GB + test2017 7 GB), and
+# test2017 is the UNLABELED competition set which cannot be validated against.
+# coco_val_only.yaml has no download block and uses only val2017.
+COCO_DATA = os.path.join("metrics", "coco_val_only.yaml")
 OUTPUT_DIR = os.path.join("metrics", "output")
 
 # One entry per model the app runs. `model` may be a .pt OR an exported .tflite
@@ -78,13 +97,13 @@ MODELS = [
         "name": "coco",
         # yolo11n is what the app ships now (assets/yolo11n_float32.tflite).
         "model": "yolo11n.pt",
-        # coco.yaml = val2017, a proper HELD-OUT set (~1 GB, auto-downloads).
+        # val2017 — a proper HELD-OUT set, and ONLY val2017 (see COCO_DATA).
         #
         # This was "coco128.yaml", which is the first 128 images of COCO
         # *train2017* — images these weights were TRAINED on. Those numbers
         # (mAP50 0.607 / 0.671) are train-set scores: inflated, and not a valid
         # basis for comparing models. Do not put them in a report.
-        "data": "coco.yaml",
+        "data": COCO_DATA,
         "untrained": [],
     },
 ]
@@ -107,6 +126,54 @@ MUTED = "#9ca3af"     # gray (untrained / empty classes)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+def count_val_instances(cfg: dict, class_names: list) -> dict:
+    """Count annotated boxes per class in the validation split.
+
+    Reads the dataset yaml, resolves its val images dir, swaps /images/ for
+    /labels/, and tallies the leading class index of every line. Returns
+    {class_name: count}; falls back to an empty dict if anything is missing, so
+    a counting problem can never take down the whole report.
+    """
+    try:
+        import yaml
+    except ImportError:
+        return {}
+    try:
+        with open(cfg["data"], encoding="utf-8") as f:
+            spec = yaml.safe_load(f)
+    except Exception:
+        return {}
+
+    root = spec.get("path") or os.path.dirname(os.path.abspath(cfg["data"]))
+    val = str(spec.get("val", ""))
+    val_dir = val if os.path.isabs(val) else os.path.join(root, val)
+    if not os.path.isdir(val_dir):
+        return {}
+
+    label_dir = val_dir.replace(os.sep + "images", os.sep + "labels")
+    label_dir = label_dir.replace("/images", "/labels")
+    if not os.path.isdir(label_dir):
+        return {}
+
+    counts = {}
+    for fname in os.listdir(label_dir):
+        if not fname.endswith(".txt"):
+            continue
+        try:
+            with open(os.path.join(label_dir, fname), encoding="utf-8") as f:
+                for line in f:
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    idx = int(parts[0])
+                    if 0 <= idx < len(class_names):
+                        counts[class_names[idx]] = counts.get(
+                            class_names[idx], 0) + 1
+        except (OSError, ValueError):
+            continue
+    return counts
+
+
 def run_validation(cfg: dict) -> dict:
     """Run Ultralytics validation for one model; return a normalized results dict."""
     from ultralytics import YOLO  # lazy import so offline mode needs no deps
@@ -119,15 +186,17 @@ def run_validation(cfg: dict) -> dict:
     names = metrics.names                       # {idx: name}
     maps = metrics.box.maps                      # mAP@50-95 per class
     ap_idx = list(metrics.box.ap_class_index)    # classes actually scored
-    nt = getattr(metrics.box, "nt_per_class", None)
 
     ordered = [names[i] for i in sorted(names)]
-    per_class, instances = {}, {}
+    per_class = {}
     for i in sorted(names):
-        name = names[i]
-        per_class[name] = float(maps[i]) if i in ap_idx else None
-        if nt is not None and i < len(nt):
-            instances[name] = int(nt[i])
+        per_class[names[i]] = float(maps[i]) if i in ap_idx else None
+
+    # Instance counts: box.nt_per_class does not exist on every Ultralytics
+    # version, and when it is missing the old code silently reported "0
+    # instances" for every class — which reads in a report as "this class was
+    # never evaluated". Counting the label files is version-proof and exact.
+    instances = count_val_instances(cfg, ordered)
 
     cm = None
     try:
@@ -290,7 +359,7 @@ def plot_confusion(results: dict, path: str) -> bool:
 
 
 def write_csv(results: dict, path: str) -> None:
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["class", "val_instances", "mAP50_95"])
         for name in results["class_names"]:
@@ -325,7 +394,7 @@ def write_summary(results: dict, path: str) -> None:
     scored.sort(key=lambda t: t[1], reverse=True)
     for name, m, inst in scored:
         lines.append(f"  {name:<14}: {m:.3f} ({inst} instances)")
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
 
@@ -345,12 +414,118 @@ def generate(results: dict) -> None:
           + ("" if has_cm else "  [confusion matrix needs live validation]"))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+def resolution_sweep():
+    """Validate the shipping accessibility model at several input sizes.
+
+    The app now runs at 320x320 instead of 640x640, which made it 4.8x faster
+    on-device. This measures what that cost in accuracy, so the speed claim can
+    be stated with its price attached instead of on its own.
+
+    Watch STAIR recall specifically. mAP averages across classes and hides the
+    one failure that matters -- a missed stair is a fall.
+    """
+    from ultralytics import YOLO
+
+    cfg = MODELS[0]  # the accessibility model
+    if not os.path.exists(cfg["model"]):
+        print(f"!! sweep skipped: {cfg['model']} not found")
+        return
+
+    out_dir = os.path.join(OUTPUT_DIR, "accessibility")
+    os.makedirs(out_dir, exist_ok=True)
+    rows = []
+
+    for size in IMGSZ_SWEEP:
+        print(f"\n[sweep] validating at {size}x{size} ...")
+        try:
+            m = YOLO(cfg["model"]).val(
+                data=cfg["data"], imgsz=size, plots=False, verbose=False)
+        except Exception as e:
+            print(f"   FAILED at {size}: {e}")
+            continue
+
+        names = m.names
+        ap_idx = list(m.box.ap_class_index)
+        per_map, per_recall = {}, {}
+        for i in sorted(names):
+            per_map[names[i]] = float(m.box.maps[i]) if i in ap_idx else None
+            # box.r is indexed by POSITION IN ap_class_index, not by class id.
+            if i in ap_idx:
+                try:
+                    per_recall[names[i]] = float(m.box.r[ap_idx.index(i)])
+                except (IndexError, TypeError):
+                    per_recall[names[i]] = None
+            else:
+                per_recall[names[i]] = None
+
+        rows.append({
+            "imgsz": size,
+            "precision": round(float(m.box.mp), 4),
+            "recall": round(float(m.box.mr), 4),
+            "mAP50": round(float(m.box.map50), 4),
+            "mAP50_95": round(float(m.box.map), 4),
+            **{f"{n}_mAP50_95": (round(v, 4) if v is not None else "")
+               for n, v in per_map.items()},
+            # Per-class RECALL is the safety metric: it is the fraction of real
+            # stairs the model actually found. mAP averages precision across
+            # thresholds and classes and hides exactly this.
+            **{f"{n}_recall": (round(v, 4) if v is not None else "")
+               for n, v in per_recall.items()},
+        })
+
+    if not rows:
+        print("!! sweep produced nothing")
+        return
+
+    path = os.path.join(out_dir, "resolution_tradeoff.csv")
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        w.writerows(rows)
+
+    print("\n" + "=" * 70)
+    print("ACCURACY vs INPUT RESOLUTION  (accessibility model)")
+    print("=" * 70)
+    hdr = list(rows[0].keys())
+    print(" | ".join(f"{h:>14}" for h in hdr))
+    print("-" * (17 * len(hdr)))
+    for r in rows:
+        print(" | ".join(f"{str(r[h]):>14}" for h in hdr))
+
+    base = next((r for r in rows if r["imgsz"] == 640), None)
+    ship = next((r for r in rows if r["imgsz"] == 320), None)
+    if base and ship:
+        print(f"""
+WHAT 320 COSTS versus 640:
+  mAP50-95 : {base['mAP50_95']:.4f} -> {ship['mAP50_95']:.4f}   """
+              f"""({(ship['mAP50_95'] - base['mAP50_95']):+.4f})
+  recall   : {base['recall']:.4f} -> {ship['recall']:.4f}   """
+              f"""({(ship['recall'] - base['recall']):+.4f})""")
+        for sk, lbl in (("Stair_mAP50_95", "STAIR mAP"),
+                        ("Stair_recall", "STAIR RECALL")):
+            if sk in base and sk in ship and base[sk] != "" and ship[sk] != "":
+                mark = "   <- THE safety metric" if "recall" in sk else ""
+                print(f"  {lbl:<12}: {base[sk]:.4f} -> {ship[sk]:.4f}   "
+                      f"({(ship[sk] - base[sk]):+.4f}){mark}")
+        print(f"""
+  Measured on-device speed at these two sizes (Galaxy S23 Ultra, profile):
+    640 -> 2951 ms/frame (0.4 FPS)
+    320 ->  619 ms/frame (1.6 FPS)   = 4.8x faster
+  That is the trade. Quote both halves together, never the speed alone.""")
+    print(f"\nSaved -> {path}")
+
+
 def main() -> None:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     print(f"[mode] {'LIVE validation' if RUN_VALIDATION else 'OFFLINE (embedded)'}")
 
     failures = []
-    for cfg in MODELS:
+    models = MODELS if INCLUDE_COCO else [
+        m for m in MODELS if m["name"] != "coco"]
+    if not INCLUDE_COCO:
+        print("[skip] COCO validation disabled (INCLUDE_COCO = False)")
+    for cfg in models:
         if not RUN_VALIDATION:
             raise SystemExit(
                 "RUN_VALIDATION is False and there is no fallback data. "
@@ -375,6 +550,9 @@ def main() -> None:
             + "\n\nNothing was written for them. Fix the paths and re-run;"
               "\ndo not quote older numbers from output/ as if they were fresh."
         )
+
+    if IMGSZ_SWEEP:
+        resolution_sweep()
 
     print(f"\nDone. See ./{OUTPUT_DIR}/<model>/ for each model's charts + tables.")
 

@@ -3,7 +3,7 @@
 //
 // WHY THIS EXISTS
 // ---------------
-// TensorflowHelper.fillInputBufferFused removes a full-resolution image
+// Letterbox.fillFused removes a full-resolution image
 // allocation and copy from every camera frame by folding the rotation into the
 // sampling loop. That is a real speedup, but it depends on reproducing the
 // `image` package's copyRotate convention EXACTLY. Get the direction wrong and
@@ -17,7 +17,7 @@
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart';
-import 'package:tensorflow_demo/utils/tensorflow_helper.dart';
+import 'package:tensorflow_demo/utils/letterbox.dart';
 
 /// Deterministic image where every pixel encodes its own coordinates, so any
 /// transposition, mirroring or off-by-one shows up as a mismatch.
@@ -54,15 +54,15 @@ void main() {
           // Reference path: materialise the rotated image, then letterbox it.
           final rotated = rot == 0 ? src : copyRotate(src, angle: rot);
           final (refPadX, refPadY) =
-              TensorflowHelper.fillInputBufferLetterbox(rotated, modelSize);
+              Letterbox.fill(rotated, modelSize);
           final reference =
-              List<double>.from(TensorflowHelper.debugInputBuffer(modelSize));
+              List<double>.from(Letterbox.buffer(modelSize));
 
           // Fast path: sample straight from the unrotated image.
           final (fusePadX, fusePadY) =
-              TensorflowHelper.fillInputBufferFused(src, modelSize, rot);
+              Letterbox.fillFused(src, modelSize, rot);
           final fused =
-              List<double>.from(TensorflowHelper.debugInputBuffer(modelSize));
+              List<double>.from(Letterbox.buffer(modelSize));
 
           expect(fusePadX, refPadX, reason: 'padX must match');
           expect(fusePadY, refPadY, reason: 'padY must match');
@@ -85,7 +85,7 @@ void main() {
                 '(first at index $firstBad).\n'
                 'The `image` package version in pubspec.lock rotates the other '
                 'way, or uses a different origin, than the switch in '
-                'TensorflowHelper.fillInputBufferFused assumes.\n'
+                'Letterbox.fillFused assumes.\n'
                 'Fix: swap the 90 and 270 cases in that switch and re-run. '
                 'Leave useFusedRotationLetterbox = false until this passes.',
           );

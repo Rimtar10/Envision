@@ -1,16 +1,33 @@
 ENVISION — LIVE RUNTIME PERFORMANCE
 ======================================
 
-Frames analysed     : 120
+Frames analysed     : 266
 
 Per-frame latency (ms):
-  mean    : 89.3
-  median  : 90.4
-  p95     : 111.3
-  min/max : 55.7 / 130.9
+  mean    : 618.8
+  median  : 605.1
+  p95     : 953.3
+  min/max : 308.4 / 1060.0
 
 Throughput (FPS):
-  mean    : 10.2
-  median  : 10.0
+  mean    : 1.6
+  median  : 1.6
 
-Avg objects / frame : 2.5
+Avg objects / frame : 1.1
+
+Per-stage mean (ms):
+  convert      11.72    1.9%   YUV/NV21 -> RGB       (Dart, ImageUtils)
+  rotate       35.94    5.8%   rotate to display     (Dart, copyRotate)
+  letterbox     0.94    0.2%   letterbox + normalise (Dart, Letterbox.fill)
+  infer       566.68   91.6%   interpreter.run       (native TFLite)
+  parse         3.45    0.6%   decode boxes + NMS    (Dart, _parseYoloOutput)
+
+  preprocessing (convert+rotate+letterbox) :   48.60 ms    7.9%
+  model inference                          :  566.68 ms   91.6%
+  post-processing                          :    3.45 ms    0.6%
+
+VERDICT:
+  The models dominate; preprocessing is not the problem.
+  Next: w8a32 quantisation, GPU delegate, and drop the
+  accessibility model to 448 input.
+  Guard Stair recall through every one of those changes.
