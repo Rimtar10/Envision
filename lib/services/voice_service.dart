@@ -60,6 +60,11 @@ class VoiceService {
   /// Called with a human-readable summary of the last heard command (for UI display)
   void Function(String text)? onCommandHeard;
 
+  /// Called when the user asks to read text ("read text", "what does this say", …).
+  /// The screen owns the camera, so it's the one that actually captures the
+  /// photo and navigates to the text-reading flow.
+  void Function()? onReadTextRequested;
+
   // ── Command vs wake-word listening ───────────────────────────────────────
   // The wake-word polling loop keeps _stt busy in the background.
   // _commandListening is ONLY true when the user explicitly triggered a
@@ -626,6 +631,24 @@ class VoiceService {
     else if (_matchesAny(command, ['date', 'what day', "today's date"])) {
       await tellDate();
     }
+    // ── READ TEXT (OCR) ──────────────────────────────────────────────────
+    else if (_matchesAny(command, [
+      'read text',
+      'read this',
+      'read that',
+      'read it',
+      'what does this say',
+      'what does it say',
+      'read the sign',
+      'read the label',
+    ])) {
+      if (onReadTextRequested != null) {
+        _speak('Reading text.');
+        onReadTextRequested!();
+      } else {
+        _speak('Text reading is not available right now.');
+      }
+    }
     // ── DESCRIBE SCENE ───────────────────────────────────────────────────
     else if (_matchesAny(command, [
       "what's in front",
@@ -792,7 +815,8 @@ class VoiceService {
   }
 
   Future<void> _tellHelp() async {
-    const response = 'You can say: describe, open followed by an app name, '
+    const response = 'You can say: describe, read text, '
+        'open followed by an app name, '
         'what time is it, battery, today\'s date, '
         'how many people, navigate to a place, '
         'repeat, stop, or help.';

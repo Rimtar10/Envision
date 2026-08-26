@@ -82,6 +82,8 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
         });
       }
     };
+
+    VoiceService.instance.onReadTextRequested = _readTextFromCamera;
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -298,38 +300,38 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                           width: 2,
                         ),
                       ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            _isListening ? Icons.mic : Icons.mic_none,
-                            color: Colors.white,
-                            size: 28,
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            _isListening ? 'Listening…' : 'Tap to Speak',
-                            style: const TextStyle(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              _isListening ? Icons.mic : Icons.mic_none,
                               color: Colors.white,
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
+                              size: 28,
                             ),
-                          ),
-                        ],
+                            const SizedBox(width: 8),
+                            Flexible(
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Text(
+                                  _isListening
+                                      ? 'Listening…'
+                                      : 'Tap to Speak',
+                                  maxLines: 1,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Semantics(
-                label: 'Flip camera',
-                button: true,
-                child: _ControlButton(
-                  icon: null,
-                  svgAsset: 'assets/vectors/repeate-music.svg',
-                  onTap: _flipCamera,
-                  size: 56,
                 ),
               ),
             ],
@@ -337,7 +339,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
           const SizedBox(height: 10),
 
-          // ── Secondary row: Analyse Photo + Face ON/OFF ────────────────
+          // ── Secondary row: Analyse Photo + Read Text + Face ON/OFF ────
           Row(
             children: [
               Expanded(
@@ -348,6 +350,19 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                     icon: Icons.camera_alt_outlined,
                     label: 'Analyse Photo',
                     onTap: _takePicture,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Semantics(
+                  label: 'Read text from camera, Arabic or English',
+                  button: true,
+                  child: _SecondaryButton(
+                    icon: Icons.text_fields,
+                    label: 'Read Text',
+                    color: Colors.teal.shade700,
+                    onTap: _readTextFromCamera,
                   ),
                 ),
               ),
@@ -388,16 +403,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                 onTap: _openFaceRegistration,
               ),
             ),
-          ),
-
-          const SizedBox(height: 8),
-          Text(
-            'Tap camera area once to speak  •  Double-tap to describe scene',
-            style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.45),
-              fontSize: 11,
-            ),
-            textAlign: TextAlign.center,
           ),
         ],
       ),
@@ -710,40 +715,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   // CAMERA ACTIONS
   // ─────────────────────────────────────────────────────────────────────────
 
-  void _flipCamera() {
-    if (cameras.length <= 1) {
-      VoiceService.instance.speak('Only one camera available.');
-      return;
-    }
-
-    cameraIndex = cameraIndex == 1 ? 0 : 1;
-
-    final newController = CameraController(
-      cameras[cameraIndex],
-      ResolutionPreset.medium,
-      enableAudio: false,
-    );
-
-    newController.initialize().then((_) async {
-      if (!mounted) return;
-
-      await newController.startImageStream(onLatestImageAvailable);
-      ScreenParams.previewSize =
-          newController.value.previewSize ?? ScreenParams.previewSize;
-
-      final oldController = _cameraController;
-      setState(() => _cameraController = newController);
-
-      try {
-        await oldController?.stopImageStream();
-      } catch (_) {}
-      await oldController?.dispose();
-    }).catchError((e) {
-      log('Failed to flip camera: $e');
-      newController.dispose();
-    });
-  }
-
   Future<void> _takePicture() async {
     VoiceService.instance.speak('Taking photo.');
     try {
@@ -754,6 +725,20 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     if (bytes != null && bytes.isNotEmpty) {
       NavigationService.instance
           .pushNamed(AppRoutes.photoAnalyzedScreen, arguments: bytes);
+    }
+  }
+
+  Future<void> _readTextFromCamera() async {
+    if (!mounted) return;
+    VoiceService.instance.speak('Taking photo.');
+    try {
+      await _cameraController?.stopImageStream();
+    } catch (_) {}
+    final captured = await _cameraController?.takePicture();
+    final bytes = await captured?.readAsBytes();
+    if (bytes != null && bytes.isNotEmpty) {
+      NavigationService.instance
+          .pushNamed(AppRoutes.textReadingScreen, arguments: bytes);
     }
   }
 
@@ -945,19 +930,26 @@ class _SecondaryButton extends StatelessWidget {
           color: color ?? Colors.white.withValues(alpha: 0.12),
           borderRadius: BorderRadius.circular(12),
         ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, color: Colors.white, size: 20),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600),
-            ),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, color: Colors.white, size: 18),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
