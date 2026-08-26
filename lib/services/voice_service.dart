@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:tensorflow_demo/models/detected_object/detected_object_dm.dart';
 import 'package:battery_plus/battery_plus.dart';
 import 'package:intl/intl.dart';
+import 'package:tensorflow_demo/services/mistral_service.dart';
 
 class VoiceService {
   static final VoiceService instance = VoiceService._();
@@ -45,6 +46,13 @@ class VoiceService {
   bool _wakeWordEnabled = false;
   bool _inConversation = false;
   Timer? _wakeWordTimer;
+
+  /// Consecutive polls that ended almost instantly (< 1.2s) with nothing
+  /// heard — a sign something is wrong (usually missing mic permission)
+  /// rather than just silence. Used to back off instead of hammering the
+  /// mic (and its start/stop beep) every ~800ms forever.
+  int _consecutiveFastFailures = 0;
+  static const _maxFastFailuresBeforeBackoff = 3;
 
   // ── Conversation context ─────────────────────────────────────────────────
   String? _lastResponse;
@@ -511,10 +519,22 @@ class VoiceService {
     }
   }
 
-  void _scheduleWakeWordPoll() {
+  void _scheduleWakeWordPoll([Duration delay = const Duration(milliseconds: 800)]) {
     _wakeWordTimer?.cancel();
     // Small delay so any current STT session fully releases the mic
-    _wakeWordTimer = Timer(const Duration(milliseconds: 800), _pollWakeWord);
+    _wakeWordTimer = Timer(delay, _pollWakeWord);
+  }
+
+  /// Delay used for the next poll after a fast-failure streak. Grows with
+  /// each consecutive fast failure (capped) so a persistent problem (e.g.
+  /// missing mic permission) doesn't spam the mic's start/stop beep.
+  Duration _backoffDelay() {
+    if (_consecutiveFastFailures < _maxFastFailuresBeforeBackoff) {
+      return const Duration(milliseconds: 800);
+    }
+    final extra = _consecutiveFastFailures - _maxFastFailuresBeforeBackoff;
+    final seconds = (2 << extra.clamp(0, 4)); // 2,4,8,16,32s
+    return Duration(seconds: seconds.clamp(2, 30));
   }
 
   Future<void> _pollWakeWord() async {
@@ -527,9 +547,16 @@ class VoiceService {
       return;
     }
 
-    if (!_stt.isAvailable) return;
+    if (!_stt.isAvailable) {
+      // Recognizer isn't ready (often means no mic permission). Back off
+      // instead of retrying every 800ms.
+      _consecutiveFastFailures++;
+      _scheduleWakeWordPoll(_backoffDelay());
+      return;
+    }
 
     bool detected = false;
+    final startedAt = DateTime.now();
 
     try {
       await _stt.listen(
@@ -551,10 +578,18 @@ class VoiceService {
       print('[WakeWord] STT error during poll: $e');
     }
 
+    final elapsed = DateTime.now().difference(startedAt);
+    if (!detected && elapsed < const Duration(milliseconds: 1200)) {
+      // The session ended almost instantly — likely an error, not silence.
+      _consecutiveFastFailures++;
+    } else {
+      _consecutiveFastFailures = 0;
+    }
+
     // Next poll is scheduled by the onStatus callback ('done'/'notListening')
     // to ensure the mic is free. The fallback timer handles edge cases.
     if (!detected) {
-      _scheduleWakeWordPoll();
+      _scheduleWakeWordPoll(_backoffDelay());
     }
   }
 
@@ -574,9 +609,10 @@ class VoiceService {
     Timer.periodic(const Duration(milliseconds: 200), (timer) {
       if (!_isSpeaking) {
         timer.cancel();
+        // The fallback spoken message is now handled centrally in
+        // _parseVoiceCommand's UNRECOGNIZED branch, so this callback only
+        // needs to update the on-screen log.
         startListening((unrecognized) {
-          _speak(
-              "Sorry, I didn't catch that. Try saying 'help' for a list of commands.");
           onCommandHeard?.call('Unrecognized: $unrecognized');
         });
       }
@@ -637,7 +673,8 @@ class VoiceService {
   // ─────────────────────────────────────────────────────────────────────────
 
   Future<void> _parseVoiceCommand(
-      String command, Function(String) onUnrecognized) async {
+      String command, Function(String) onUnrecognized,
+      {bool isRetry = false}) async {
     // ── STOP / CANCEL ────────────────────────────────────────────────────
     if (_matchesAny(
         command, ['stop', 'cancel', 'quiet', 'silence', 'shut up'])) {
@@ -715,15 +752,16 @@ class VoiceService {
       }
     }
     // ── TAKE / ANALYSE PHOTO (camera screen) ────────────────────────────
-    else if (_matchesAny(command, [
-      'take a photo',
-      'take photo',
-      'take picture',
-      'analyse photo',
-      'analyze photo',
-      'analyse this',
-      'analyze this',
-    ])) {
+    // Broad match instead of an exhaustive phrase list: "take" + a
+    // photo/picture word, or "analyse/analyze" + this/photo/picture.
+    else if ((command.contains('take') &&
+            (command.contains('photo') ||
+                command.contains('picture') ||
+                command.contains('pic'))) ||
+        ((command.contains('analyse') || command.contains('analyze')) &&
+            (command.contains('photo') ||
+                command.contains('picture') ||
+                command.contains('this')))) {
       if (onTakePhotoRequested != null) {
         onTakePhotoRequested!();
       } else {
@@ -839,10 +877,53 @@ class VoiceService {
         command, ['scan storage', 'find apk', 'search storage'])) {
       await scanStorageForApks();
     }
-    // ── UNRECOGNIZED ─────────────────────────────────────────────────────
+    // ── UNRECOGNIZED — try Mistral before giving up ──────────────────────
     else {
-      onUnrecognized(command);
+      await _handleUnmatchedCommand(command, onUnrecognized, isRetry: isRetry);
     }
+  }
+
+  /// Called when the local keyword matching in [_parseVoiceCommand] found
+  /// nothing. Tries Mistral (if configured) in two steps:
+  ///   1. Ask it to map the transcript onto one of Envision's own known
+  ///      commands (fixes misheard/unusual phrasings like "take a picture"
+  ///      without hardcoding every variant).
+  ///   2. If that also comes back empty, treat it as an open-ended
+  ///      question and answer it conversationally — this doubles as the
+  ///      "ask Envision anything" chatbot.
+  /// Falls back to the plain "didn't understand" message if Mistral isn't
+  /// configured, errors out, or [isRetry] is true (prevents infinite
+  /// recursion if a classified command somehow doesn't match on replay).
+  Future<void> _handleUnmatchedCommand(
+    String command,
+    Function(String) onUnrecognized, {
+    required bool isRetry,
+  }) async {
+    if (command.isEmpty) {
+      _speak(
+          "Sorry, I didn't hear anything. Try saying 'help' for a list of commands.");
+      onUnrecognized(command);
+      return;
+    }
+
+    if (!isRetry && MistralService.instance.isConfigured) {
+      final matched = await MistralService.instance.classifyCommand(command);
+      if (matched != null) {
+        await _parseVoiceCommand(matched, onUnrecognized, isRetry: true);
+        return;
+      }
+
+      // No known command matched — treat it as an open-ended question.
+      final reply = await MistralService.instance.chat(command);
+      _speak(reply);
+      _lastResponse = reply;
+      onUnrecognized(command);
+      return;
+    }
+
+    _speak(
+        "Sorry, I didn't understand \"$command\". Try saying 'help' for a list of commands.");
+    onUnrecognized(command);
   }
 
   /// Returns true if [text] contains any of the [phrases].
@@ -976,7 +1057,8 @@ class VoiceService {
         'open followed by an app name, '
         'what time is it, battery, today\'s date, '
         'how many people, navigate to a place, '
-        'repeat, stop, or help.';
+        'repeat, stop, or help. '
+        'You can also just ask me a question if it is not one of these.';
     _speak(response);
     _lastResponse = response;
   }
