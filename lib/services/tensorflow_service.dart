@@ -64,17 +64,39 @@ class TensorflowService {
     await initialize();
   }
 
-  /// Builds interpreter options, preferring hardware acceleration.
+  // ── GPU delegate: OFF, and it stays off until proven per-device ──────────
+  //
+  // MEASURED, Galaxy S23 Ultra (SM-S918B, Snapdragon 8 Gen 2), profile build,
+  // with the Android GPU delegate enabled:
+  //
+  //   convert 8.97 | rotate 47.52 | letterbox 4.16 | INFER 2652.63 | parse 19.57
+  //   -> 0.49 FPS
+  //
+  // Inference alone was 2.65 SECONDS, 97% of the frame, against ~60 ms of
+  // preprocessing. Before the delegate existed the whole frame took ~89 ms on
+  // 4 CPU threads. Enabling the GPU made the app roughly 30x SLOWER.
+  //
+  // Why: a TFLite delegate only claims the ops it has kernels for. Every op it
+  // cannot run stays on CPU, and each hand-off copies tensors across the
+  // CPU/GPU boundary. A YOLO graph with a few unsupported ops therefore
+  // ping-pongs megabytes per layer, per frame. The delegate loads without
+  // error and reports success while destroying throughput -- which is why this
+  // is now gated behind a measurement instead of an assumption.
+  //
+  // Do NOT set this true without capturing PERF_CSV before and after on the
+  // specific device. Even where it works the benefit is heavily SoC-dependent
+  // (~3.3x on some Snapdragon/Exynos parts, near zero on Tensor G5), so
+  // "it helped on another phone" is not evidence for this one.
+  static const bool useGpuDelegate = false;
+
+  /// Builds interpreter options.
   ///
-  /// Previously only iOS got a delegate; Android ran on 4 CPU threads with no
-  /// acceleration at all. GPU delegation is typically 2-5x on mid-range Android
-  /// hardware, which is the single largest speed lever left in the app.
-  ///
-  /// Not every TFLite op has a GPU kernel, so a failed delegate must NOT be
-  /// fatal — we fall back to multi-threaded CPU, which is what shipped before.
+  /// CPU with 4 threads is the measured-fastest configuration for these models
+  /// today. LiteRT applies XNNPACK automatically to float models, so this is
+  /// not an unaccelerated path -- it is the fast one.
   InterpreterOptions _buildOptions({required bool tryDelegate}) {
     final options = InterpreterOptions()..threads = 4;
-    if (!tryDelegate) return options;
+    if (!tryDelegate || !useGpuDelegate) return options;
 
     try {
       if (defaultTargetPlatform == TargetPlatform.iOS) {
@@ -91,19 +113,17 @@ class TensorflowService {
   Future<void> _loadModel() async {
     Interpreter? interpreter;
 
-    // Attempt 1: hardware-accelerated. Attempt 2: plain CPU.
-    for (final tryDelegate in [true, false]) {
+    // Attempt 1: accelerated (only if useGpuDelegate). Attempt 2: plain CPU.
+    for (final tryDelegate in [useGpuDelegate, false]) {
       try {
         interpreter = await Interpreter.fromAsset(
           modelPath,
           options: _buildOptions(tryDelegate: tryDelegate),
         );
-        if (tryDelegate) {
-          log('loaded with GPU delegate', name: 'TensorflowService[$modelPath]');
-        } else {
-          log('loaded on CPU (4 threads)',
-              name: 'TensorflowService[$modelPath]');
-        }
+        // Printed so the capture log proves which path actually ran.
+        // ignore: avoid_print
+        print('MODEL_LOAD,$modelPath,'
+            '${tryDelegate ? "GPU_DELEGATE" : "CPU_4_THREADS"}');
         break;
       } catch (e) {
         if (!tryDelegate) {
@@ -119,7 +139,11 @@ class TensorflowService {
     loaded.allocateTensors();
 
     final geometry = ModelGeometry.fromInterpreter(loaded);
-    log('$geometry', name: 'TensorflowService[$modelPath]');
+    // print(), not log(): dart:developer log() does not reliably reach logcat
+    // on-device, and this line is how a capture PROVES which resolution and
+    // class count actually loaded rather than us trusting the filename.
+    // ignore: avoid_print
+    print('MODEL_GEOMETRY,$modelPath,$geometry');
 
     if (_enableDebugLogs) {
       log('in:  ${loaded.getInputTensors().map((e) => e.shape).toList()}',

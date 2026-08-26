@@ -30,6 +30,7 @@ class PerfStats {
     required this.lastInferenceMs,
     required this.avgInferenceMs,
     required this.detections,
+    this.stageMs = const <double>[0, 0, 0, 0, 0, 0],
   });
 
   /// Frames processed per second (rolling average over recent frames).
@@ -45,8 +46,25 @@ class PerfStats {
   /// Number of objects detected in the most recent frame.
   final int detections;
 
+  /// Per-stage milliseconds for the most recent frame:
+  /// [total, convert, rotate, letterbox, inference, postprocess].
+  final List<double> stageMs;
+
+  /// Milliseconds spent turning a camera frame into a model input tensor --
+  /// conversion + rotation + letterboxing. If this rivals or exceeds
+  /// [modelMs], the bottleneck is preprocessing, not the model.
+  double get preprocessMs =>
+      stageMs.length > 3 ? stageMs[1] + stageMs[2] + stageMs[3] : 0;
+
+  /// Milliseconds actually spent inside the interpreters.
+  double get modelMs => stageMs.length > 4 ? stageMs[4] : 0;
+
   static const zero = PerfStats(
-    fps: 0, lastInferenceMs: 0, avgInferenceMs: 0, detections: 0);
+      fps: 0,
+      lastInferenceMs: 0,
+      avgInferenceMs: 0,
+      detections: 0,
+      stageMs: <double>[0, 0, 0, 0, 0, 0]);
 }
 
 /// Runs object detection using two YOLOv8 models in a background isolate:
@@ -160,7 +178,10 @@ class Detector {
           final inferenceMs = (command.args != null && command.args!.length > 1)
               ? (command.args![1] as num).toDouble()
               : 0.0;
-          _updatePerf(inferenceMs, stabilized.length);
+          final stages = (command.args != null && command.args!.length > 2)
+              ? (command.args![2] as List).cast<double>()
+              : const <double>[0, 0, 0, 0, 0, 0];
+          _updatePerf(inferenceMs, stabilized.length, stages);
         }
       default:
         if (_enableDebugLogs) debugPrint('Detector unrecognized command: ${command.processType}');
@@ -172,7 +193,8 @@ class Detector {
   /// To capture a session for offline graphing, run:
   ///   flutter run | tee perf_log.txt
   /// then feed perf_log.txt to metrics/runtime_report.py.
-  void _updatePerf(double inferenceMs, int detections) {
+  void _updatePerf(double inferenceMs, int detections,
+      [List<double> stageUs = const <double>[0, 0, 0, 0, 0, 0]]) {
     final now = DateTime.now();
 
     if (_lastResultTime != null) {
@@ -200,6 +222,8 @@ class Detector {
       lastInferenceMs: inferenceMs,
       avgInferenceMs: avgMs,
       detections: detections,
+      stageMs: List<double>.unmodifiable(
+          stageUs.map((us) => us / 1000.0).toList(growable: false)),
     );
 
     // Use print (not debugPrint) for telemetry: debugPrint rate-limits output
@@ -207,12 +231,16 @@ class Detector {
     // release/profile build, corrupting the runtime graphs.
     if (!_perfCsvHeaderPrinted) {
       // ignore: avoid_print
-      print('PERF_CSV,timestamp_ms,inference_ms,fps,detections');
+      print('PERF_CSV,timestamp_ms,inference_ms,fps,detections,'
+          'convert_ms,rotate_ms,letterbox_ms,infer_ms,parse_ms');
       _perfCsvHeaderPrinted = true;
     }
+    String ms(int i) =>
+        (i < stageUs.length ? stageUs[i] / 1000.0 : 0.0).toStringAsFixed(2);
     // ignore: avoid_print
     print('PERF_CSV,${now.millisecondsSinceEpoch},'
-        '${inferenceMs.toStringAsFixed(1)},${fps.toStringAsFixed(2)},$detections');
+        '${inferenceMs.toStringAsFixed(1)},${fps.toStringAsFixed(2)},$detections,'
+        '${ms(1)},${ms(2)},${ms(3)},${ms(4)},${ms(5)}');
   }
 
   /// Classes where a one-frame delay is not acceptable. Mirrors
@@ -323,30 +351,76 @@ class _DetectorServer {
     }
   }
 
+  /// Per-stage timings for the frame currently being processed, in
+  /// microseconds. Sent to the UI isolate as a plain List<double> (always
+  /// transferable) rather than a custom class.
+  final List<double> _stageUs = List<double>.filled(6, 0);
+
   void _convertCameraImage(CameraImage cameraImage) {
-    final sw = Stopwatch()..start();
+    final swTotal = Stopwatch()..start();
     try {
+      // ── Stage 1: YUV/NV21/BGRA -> RGB ─────────────────────────────────
+      // Pure Dart, one pass over every sensor pixel. Prime suspect for the
+      // frame budget: a published benchmark puts the pure-Dart `image`
+      // package at 82.5 ms for convert+rotate+resize where native OpenCV
+      // does the same work in 5.4 ms.
+      final swConvert = Stopwatch()..start();
       var image = ImageUtils.convertCameraImageToImage(cameraImage);
+      swConvert.stop();
+
       if (image == null) {
         _sendPort.send(_Command(TensorflowProcessType.result,
-            args: [<DetectedObjectDm>[], 0]));
+            args: [<DetectedObjectDm>[], 0.0, _stageUs]));
         return;
       }
 
-      if (_sensorOrientation != 0) {
+      // ── Stage 2: rotation to display orientation ──────────────────────
+      // Allocates and copies a whole second full-resolution image. Becomes
+      // free once TensorflowHelper.useFusedRotationLetterbox is enabled,
+      // which folds this into the letterbox sampling loop.
+      final swRotate = Stopwatch()..start();
+      if (_sensorOrientation != 0 &&
+          !TensorflowHelper.useFusedRotationLetterbox) {
         image = copyRotate(image, angle: _sensorOrientation);
       }
+      swRotate.stop();
 
+      // ── Stages 3-5: letterbox, inference, post-process (per model) ────
+      _letterboxUs = 0;
+      _inferUs = 0;
+      _parseUs = 0;
       final results = _analyseImageCamera(image);
-      sw.stop();
-      // Second arg = full per-frame processing time in ms (telemetry).
-      _sendPort.send(
-          _Command(TensorflowProcessType.result, args: [results, sw.elapsedMilliseconds]));
+
+      swTotal.stop();
+
+      _stageUs[0] = swTotal.elapsedMicroseconds.toDouble();
+      _stageUs[1] = swConvert.elapsedMicroseconds.toDouble();
+      _stageUs[2] = swRotate.elapsedMicroseconds.toDouble();
+      _stageUs[3] = _letterboxUs.toDouble();
+      _stageUs[4] = _inferUs.toDouble();
+      _stageUs[5] = _parseUs.toDouble();
+
+      _sendPort.send(_Command(TensorflowProcessType.result, args: [
+        results,
+        swTotal.elapsedMicroseconds / 1000.0,
+        List<double>.from(_stageUs),
+      ]));
     } catch (e, s) {
       if (_enableDebugLogs) debugPrint('[DetectorServer] ERROR: $e\n$s');
       _sendPort.send(_Command(TensorflowProcessType.result,
-          args: [<DetectedObjectDm>[], 0]));
+          args: [<DetectedObjectDm>[], 0.0, _stageUs]));
     }
+  }
+
+  // Accumulators across the (up to two) models run on one frame.
+  int _letterboxUs = 0;
+  int _inferUs = 0;
+  int _parseUs = 0;
+
+  void _collectStageTimings() {
+    _letterboxUs += TensorflowHelper.lastLetterboxUs;
+    _inferUs += TensorflowHelper.lastInferUs;
+    _parseUs += TensorflowHelper.lastParseUs;
   }
 
   /// Runs the COCO model every frame and the accessibility model every Nth
@@ -365,6 +439,7 @@ class _DetectorServer {
         drawObjectOnImage: false,
         returnDetectedImage: false,
       ).detectedObjects;
+      _collectStageTimings();
     }
 
     // ── Accessibility model (nc=3: Door, Stair, Window) — every Nth frame ──
@@ -379,6 +454,7 @@ class _DetectorServer {
         drawObjectOnImage: false,
         returnDetectedImage: false,
       ).detectedObjects;
+      _collectStageTimings();
       // v2 has no untrained channels, so this filter is a pass-through now.
       _lastAcc = acc
           .where((d) => !_untrainedAccClasses.contains(d.label))

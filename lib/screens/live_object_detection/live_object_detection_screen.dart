@@ -201,15 +201,37 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                                   color: Colors.black.withValues(alpha: 0.6),
                                   borderRadius: BorderRadius.circular(10),
                                 ),
-                                child: Text(
-                                  '${p.fps.toStringAsFixed(1)} FPS  •  '
-                                  '${p.lastInferenceMs.toStringAsFixed(0)} ms  •  '
-                                  '${p.detections} obj',
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                  ),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      '${p.fps.toStringAsFixed(1)} FPS  •  '
+                                      '${p.lastInferenceMs.toStringAsFixed(0)} ms  •  '
+                                      '${p.detections} obj',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    // Where the frame budget actually goes.
+                                    // If 'pre' rivals or beats 'model', the
+                                    // bottleneck is moving pixels around in
+                                    // Dart, not the detectors — and no model
+                                    // swap will fix it.
+                                    if (p.preprocessMs > 0)
+                                      Text(
+                                        'pre ${p.preprocessMs.toStringAsFixed(0)}  '
+                                        'model ${p.modelMs.toStringAsFixed(0)}',
+                                        style: TextStyle(
+                                          color: p.preprocessMs > p.modelMs
+                                              ? Colors.orangeAccent
+                                              : Colors.white70,
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                  ],
                                 ),
                               );
                             },

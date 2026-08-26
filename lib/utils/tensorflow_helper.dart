@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:image/image.dart';
+import 'package:tensorflow_demo/utils/letterbox.dart';
 import 'package:tensorflow_demo/models/detected_object/detected_object_dm.dart';
 import 'package:tensorflow_demo/values/typedefs.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
@@ -84,26 +85,22 @@ class TensorflowHelper {
   //
   // TO ENABLE:
   //     flutter test test/letterbox_parity_test.dart
+  // (the maths itself lives in lib/utils/letterbox.dart, which
+  //  imports no native plugins so it is testable off-device)
   // That test asserts the fused path is byte-identical to
   // copyRotate + letterbox for 0/90/180/270 across several image sizes.
   // If it passes, set this to true and you get the speedup for free.
   // If it fails, it prints the correct mapping for your `image` version.
   static const bool useFusedRotationLetterbox = false;
 
-  // ── Reusable buffers, keyed by input size ─────────────────────────────────
-  // Allocating these per frame created heavy GC pressure. Keyed by size so a
-  // 640 model and a 448 model can coexist without clobbering each other.
-  static final Map<int, Float32List> _inputBuffers = {};
-  static final Map<int, Int32List> _xSrcMaps = {};
-
-  static Float32List _inputBuffer(int size) =>
-      _inputBuffers[size] ??= Float32List(1 * size * size * 3);
-
-  static Int32List _xSrcMap(int size) => _xSrcMaps[size] ??= Int32List(size);
-
-  /// Read-only view of the model input buffer, for tests only.
-  /// See test/letterbox_parity_test.dart.
-  static Float32List debugInputBuffer(int size) => _inputBuffer(size);
+  // ── Stage profiling ────────────────────────────────────────────────────
+  // Microsecond timings from the most recent analyseImage() call. A static is
+  // safe here: analyseImage only ever runs on the detector isolate, one call
+  // at a time. Using a static avoids threading a timings object through every
+  // call site and back across the isolate boundary.
+  static int lastLetterboxUs = 0;
+  static int lastInferUs = 0;
+  static int lastParseUs = 0;
 
   // ── Class-specific confidence thresholds ─────────────────────────────────
   // Hazardous / mobility-relevant classes use a lower threshold so they are
@@ -191,156 +188,6 @@ class TensorflowHelper {
     return canvas;
   }
 
-  /// Fills the model input buffer with a letterboxed, normalized view of
-  /// [image] and returns (padX, padY) for bounding-box coordinate remapping.
-  ///
-  /// [image] must already be rotated to display orientation.
-  static (double, double) fillInputBufferLetterbox(Image image, int modelSize) {
-    final buffer = _inputBuffer(modelSize);
-    final xSrcMap = _xSrcMap(modelSize);
-
-    final scale = modelSize / max(image.width, image.height);
-    final newWidth = (image.width * scale).round();
-    final newHeight = (image.height * scale).round();
-    final xOffset = (modelSize - newWidth) ~/ 2;
-    final yOffset = (modelSize - newHeight) ~/ 2;
-    final srcWidth = image.width;
-    final srcHeight = image.height;
-
-    // Pre-compute source-x for each model-x column (replaces per-pixel division)
-    for (int x = 0; x < modelSize; x++) {
-      xSrcMap[x] = (x < xOffset || x >= xOffset + newWidth)
-          ? -1
-          : ((x - xOffset) / scale).round().clamp(0, srcWidth - 1);
-    }
-
-    // Raw RGB bytes — direct memory access, no per-pixel Pixel object overhead
-    final bytes = image.getBytes(order: ChannelOrder.rgb);
-
-    int offset = 0;
-    const inv255 = 1.0 / 255.0;
-
-    for (int y = 0; y < modelSize; y++) {
-      final srcY = (y < yOffset || y >= yOffset + newHeight)
-          ? -1
-          : ((y - yOffset) / scale).round().clamp(0, srcHeight - 1);
-      final rowBase = srcY < 0 ? 0 : srcY * srcWidth;
-
-      for (int x = 0; x < modelSize; x++) {
-        final srcX = xSrcMap[x];
-        if (srcY < 0 || srcX < 0) {
-          buffer[offset] = 0.0;
-          buffer[offset + 1] = 0.0;
-          buffer[offset + 2] = 0.0;
-        } else {
-          final srcOff = (rowBase + srcX) * 3;
-          buffer[offset] = bytes[srcOff] * inv255;
-          buffer[offset + 1] = bytes[srcOff + 1] * inv255;
-          buffer[offset + 2] = bytes[srcOff + 2] * inv255;
-        }
-        offset += 3;
-      }
-    }
-
-    return (xOffset.toDouble(), yOffset.toDouble());
-  }
-
-  /// Fused rotate + letterbox: samples directly from the UNROTATED [image],
-  /// applying a [rotationDegrees] rotation via index arithmetic instead of
-  /// materialising a rotated copy.
-  ///
-  /// Saves one full-resolution allocation and copy per frame. Guarded by
-  /// [useFusedRotationLetterbox]; see the comment on that flag and the
-  /// parity test in test/letterbox_parity_test.dart.
-  ///
-  /// Rotation is clockwise, matching `copyRotate(image, angle: n)`.
-  /// For a source of W x H, destination dimensions are:
-  ///   0/180  -> W x H
-  ///   90/270 -> H x W
-  /// Inverse mapping (destination -> source):
-  ///     0   : sx = dx,               sy = dy
-  ///    90   : sx = dy,               sy = (H - 1) - dx
-  ///   180   : sx = (W - 1) - dx,     sy = (H - 1) - dy
-  ///   270   : sx = (W - 1) - dy,     sy = dx
-  static (double, double) fillInputBufferFused(
-    Image image,
-    int modelSize,
-    int rotationDegrees,
-  ) {
-    final buffer = _inputBuffer(modelSize);
-
-    final rot = ((rotationDegrees % 360) + 360) % 360;
-    final swap = rot == 90 || rot == 270;
-
-    final srcW = image.width;
-    final srcH = image.height;
-    // Dimensions AFTER rotation — this is the geometry the letterbox sees.
-    final rotW = swap ? srcH : srcW;
-    final rotH = swap ? srcW : srcH;
-
-    final scale = modelSize / max(rotW, rotH);
-    final newWidth = (rotW * scale).round();
-    final newHeight = (rotH * scale).round();
-    final xOffset = (modelSize - newWidth) ~/ 2;
-    final yOffset = (modelSize - newHeight) ~/ 2;
-
-    // Map model-x -> rotated-image-x once per frame.
-    final xSrcMap = _xSrcMap(modelSize);
-    for (int x = 0; x < modelSize; x++) {
-      xSrcMap[x] = (x < xOffset || x >= xOffset + newWidth)
-          ? -1
-          : ((x - xOffset) / scale).round().clamp(0, rotW - 1);
-    }
-
-    final bytes = image.getBytes(order: ChannelOrder.rgb);
-
-    int offset = 0;
-    const inv255 = 1.0 / 255.0;
-
-    for (int y = 0; y < modelSize; y++) {
-      final rotY = (y < yOffset || y >= yOffset + newHeight)
-          ? -1
-          : ((y - yOffset) / scale).round().clamp(0, rotH - 1);
-
-      for (int x = 0; x < modelSize; x++) {
-        final rotX = xSrcMap[x];
-        if (rotY < 0 || rotX < 0) {
-          buffer[offset] = 0.0;
-          buffer[offset + 1] = 0.0;
-          buffer[offset + 2] = 0.0;
-          offset += 3;
-          continue;
-        }
-
-        // Un-rotate: (rotX, rotY) in display space -> (sx, sy) in sensor space
-        final int sx;
-        final int sy;
-        switch (rot) {
-          case 90:
-            sx = rotY;
-            sy = (srcH - 1) - rotX;
-          case 180:
-            sx = (srcW - 1) - rotX;
-            sy = (srcH - 1) - rotY;
-          case 270:
-            sx = (srcW - 1) - rotY;
-            sy = rotX;
-          default:
-            sx = rotX;
-            sy = rotY;
-        }
-
-        final srcOff = (sy * srcW + sx) * 3;
-        buffer[offset] = bytes[srcOff] * inv255;
-        buffer[offset + 1] = bytes[srcOff + 1] * inv255;
-        buffer[offset + 2] = bytes[srcOff + 2] * inv255;
-        offset += 3;
-      }
-    }
-
-    return (xOffset.toDouble(), yOffset.toDouble());
-  }
-
   /// Runs detection on [image].
   ///
   /// [geometry] must come from the same interpreter that will run inference.
@@ -360,13 +207,18 @@ class TensorflowHelper {
   }) {
     final size = geometry.inputSize;
 
+    final swLetterbox = Stopwatch()..start();
     final (padX, padY) =
         (useFusedRotationLetterbox && rotationDegrees % 360 != 0)
-            ? fillInputBufferFused(image, size, rotationDegrees)
-            : fillInputBufferLetterbox(image, size);
+            ? Letterbox.fillFused(image, size, rotationDegrees)
+            : Letterbox.fill(image, size);
+    swLetterbox.stop();
 
+    final swInfer = Stopwatch()..start();
     final rawOutput = _runInferenceOnly(interpreter, geometry);
+    swInfer.stop();
 
+    final swParse = Stopwatch()..start();
     final detectedObjectList = _parseYoloOutput(
       rawOutput,
       label,
@@ -376,6 +228,11 @@ class TensorflowHelper {
       padX: padX,
       padY: padY,
     );
+    swParse.stop();
+
+    lastLetterboxUs = swLetterbox.elapsedMicroseconds;
+    lastInferUs = swInfer.elapsedMicroseconds;
+    lastParseUs = swParse.elapsedMicroseconds;
 
     // Camera path: skip all image work (most common case)
     if (!drawObjectOnImage && !returnDetectedImage) {
@@ -409,9 +266,19 @@ class TensorflowHelper {
   }
 
   /// Reusable output buffers keyed by class count. Allocating the
-  /// [1, nc+4, anchors] tensor on every frame (~2.8 MB for the 80-class COCO
-  /// model at 640) created heavy GC pressure; we allocate once per model shape
-  /// and reuse it — the interpreter overwrites it on each run.
+  /// [1, nc+4, anchors] tensor on every frame created heavy GC pressure; we
+  /// allocate once per model shape and reuse it -- the interpreter overwrites
+  /// it on each run.
+  ///
+  /// NOTE (performance, unresolved): the `reshape` on the INPUT buffer below
+  /// runs every frame and converts a flat Float32List of inputSize^2 * 3
+  /// floats into nested Dart Lists. Measured on a Galaxy S23 Ultra this path
+  /// costs ~1.9 s per model call, independent of model size -- which is the
+  /// signature of a fixed per-call overhead rather than of arithmetic.
+  ///
+  /// A flat setTo/invoke/copyTo rewrite was attempted and BROKE the app, so it
+  /// is reverted here. Do not retry it without checking the exact
+  /// tflite_flutter 0.12.1 Tensor API and testing on-device first.
   static final Map<String, List> _outputCache = {};
 
   static List<List<List<double>>> _runInferenceOnly(
@@ -419,7 +286,7 @@ class TensorflowHelper {
     ModelGeometry g,
   ) {
     final input =
-        _inputBuffer(g.inputSize).reshape([1, g.inputSize, g.inputSize, 3]);
+        Letterbox.buffer(g.inputSize).reshape([1, g.inputSize, g.inputSize, 3]);
 
     final key = '${g.numClasses}x${g.numAnchors}';
     final output = _outputCache[key] ??=
