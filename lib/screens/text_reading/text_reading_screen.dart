@@ -28,6 +28,23 @@ class _TextReadingScreenState extends State<TextReadingScreen> {
       SnackBarService.show('Reading text...');
       _readText();
     });
+    VoiceService.instance.onReadAgainRequested = _readAgain;
+    VoiceService.instance.onGoBackRequested = _goBack;
+  }
+
+  @override
+  void dispose() {
+    VoiceService.instance.onReadAgainRequested = null;
+    VoiceService.instance.onGoBackRequested = null;
+    super.dispose();
+  }
+
+  void _readAgain() {
+    if (_result != null) _announceResult(_result!);
+  }
+
+  void _goBack() {
+    if (mounted) Navigator.pop(context);
   }
 
   Future<void> _readText() async {

@@ -65,6 +65,45 @@ class VoiceService {
   /// photo and navigates to the text-reading flow.
   void Function()? onReadTextRequested;
 
+  // ── Screen-specific voice actions ────────────────────────────────────────
+  // Each of these mirrors [onReadTextRequested]: the currently-mounted screen
+  // sets the callback it can serve, and _parseVoiceCommand fires whichever
+  // one is registered. Only one screen is visible at a time, so there's no
+  // ambiguity about which handler should run.
+
+  /// Camera screen: take a photo and analyse it for objects.
+  void Function()? onTakePhotoRequested;
+
+  /// Camera screen: toggle face recognition on/off.
+  void Function()? onToggleFaceRecognitionRequested;
+
+  /// Camera screen: navigate to the face-registration flow.
+  void Function()? onOpenFaceRegistrationRequested;
+
+  /// Home screen: navigate to the live camera screen.
+  void Function()? onOpenCameraRequested;
+
+  /// Face registration screen: begin the auto-capture sequence.
+  void Function()? onStartCaptureRequested;
+
+  /// Face registration screen: retake the captured photos.
+  void Function()? onRetakeRequested;
+
+  /// Face registration screen: confirm/submit the registration.
+  void Function()? onConfirmRegistrationRequested;
+
+  /// Face registration screen: delete a registered face by spoken name.
+  void Function(String name)? onDeleteFaceRequested;
+
+  /// Face registration screen: fill the name field from a spoken name.
+  void Function(String name)? onNameProvided;
+
+  /// Text reading / photo analysis screens: re-speak the last result.
+  void Function()? onReadAgainRequested;
+
+  /// Any screen: go back to the previous screen.
+  void Function()? onGoBackRequested;
+
   // ── Command vs wake-word listening ───────────────────────────────────────
   // The wake-word polling loop keeps _stt busy in the background.
   // _commandListening is ONLY true when the user explicitly triggered a
@@ -666,6 +705,121 @@ class VoiceService {
       final afterMany = _extractAfter(command, 'how many');
       if (afterMany != null) await countObjects(afterMany);
     }
+    // ── OPEN CAMERA (home screen) ────────────────────────────────────────
+    else if (_matchesAny(
+        command, ['open camera', 'open the camera', 'go to camera', 'launch camera'])) {
+      if (onOpenCameraRequested != null) {
+        onOpenCameraRequested!();
+      } else {
+        _speak('Camera is not available from this screen.');
+      }
+    }
+    // ── TAKE / ANALYSE PHOTO (camera screen) ────────────────────────────
+    else if (_matchesAny(command, [
+      'take a photo',
+      'take photo',
+      'take picture',
+      'analyse photo',
+      'analyze photo',
+      'analyse this',
+      'analyze this',
+    ])) {
+      if (onTakePhotoRequested != null) {
+        onTakePhotoRequested!();
+      } else {
+        _speak('Taking a photo is not available from this screen.');
+      }
+    }
+    // ── TOGGLE FACE RECOGNITION (camera screen) ─────────────────────────
+    else if (command.contains('face recognition') &&
+        _matchesAny(command, ['on', 'off', 'toggle', 'enable', 'disable'])) {
+      if (onToggleFaceRecognitionRequested != null) {
+        onToggleFaceRecognitionRequested!();
+      } else {
+        _speak('Face recognition is not available from this screen.');
+      }
+    }
+    // ── REGISTER A FACE — open the registration screen ──────────────────
+    else if (_matchesAny(command,
+        ['register a face', 'register face', 'add a face', 'new face'])) {
+      if (onOpenFaceRegistrationRequested != null) {
+        onOpenFaceRegistrationRequested!();
+      } else {
+        _speak('Face registration is not available from this screen.');
+      }
+    }
+    // ── START CAPTURE (face registration screen) ─────────────────────────
+    else if (_matchesAny(command, [
+      'start capture',
+      'start capturing',
+      'begin capture',
+      'begin capturing',
+      'start registration',
+      'capture photos',
+    ])) {
+      if (onStartCaptureRequested != null) {
+        onStartCaptureRequested!();
+      } else {
+        _speak('Nothing to capture right now.');
+      }
+    }
+    // ── RETAKE (face registration screen) ────────────────────────────────
+    else if (_matchesAny(command, ['retake', 'try again', 'redo photos'])) {
+      if (onRetakeRequested != null) {
+        onRetakeRequested!();
+      } else {
+        _speak('Nothing to retake right now.');
+      }
+    }
+    // ── CONFIRM REGISTRATION (face registration screen) ──────────────────
+    else if (_matchesAny(command,
+        ['confirm registration', 'save face', 'confirm', 'submit'])) {
+      if (onConfirmRegistrationRequested != null) {
+        onConfirmRegistrationRequested!();
+      } else {
+        _speak('Nothing to confirm right now.');
+      }
+    }
+    // ── DELETE A REGISTERED FACE (face registration screen) ──────────────
+    else if (command.startsWith('delete ') || command.startsWith('remove ')) {
+      final name = command
+          .replaceFirst(RegExp(r'^(delete|remove)\s+'), '')
+          .trim();
+      if (name.isNotEmpty && onDeleteFaceRequested != null) {
+        onDeleteFaceRequested!(name);
+      } else {
+        _speak('I could not tell who to delete.');
+      }
+    }
+    // ── PROVIDE A NAME (face registration screen) ─────────────────────────
+    else if (_matchesAny(command, ['my name is', 'name is', 'call them'])) {
+      final name = command
+          .replaceFirst(RegExp(r'^(my name is|name is|call them)\s+'), '')
+          .trim();
+      if (name.isNotEmpty && onNameProvided != null) {
+        onNameProvided!(name);
+      } else {
+        _speak('I did not catch the name.');
+      }
+    }
+    // ── READ AGAIN (text reading / photo analysis screens) ────────────────
+    else if (_matchesAny(command, ['read again', 'say the text again'])) {
+      if (onReadAgainRequested != null) {
+        onReadAgainRequested!();
+      } else if (_lastResponse != null) {
+        _speak(_lastResponse!);
+      } else {
+        _speak('Nothing to read again.');
+      }
+    }
+    // ── GO BACK ────────────────────────────────────────────────────────────
+    else if (_matchesAny(command, ['go back', 'go back to camera', 'back to camera'])) {
+      if (onGoBackRequested != null) {
+        onGoBackRequested!();
+      } else {
+        _speak('Cannot go back from this screen.');
+      }
+    }
     // ── OPEN / LAUNCH APP ────────────────────────────────────────────────
     else if (command.startsWith('open ') || command.startsWith('launch ')) {
       final appName = command.replaceFirst(RegExp(r'^(open|launch)\s+'), '');
@@ -815,7 +969,10 @@ class VoiceService {
   }
 
   Future<void> _tellHelp() async {
-    const response = 'You can say: describe, read text, '
+    const response = 'You can say: describe, read text, take a photo, '
+        'turn face recognition on or off, register a face, open camera, '
+        'start capture, retake, confirm, delete followed by a name, '
+        'my name is followed by a name, read again, go back, '
         'open followed by an app name, '
         'what time is it, battery, today\'s date, '
         'how many people, navigate to a place, '

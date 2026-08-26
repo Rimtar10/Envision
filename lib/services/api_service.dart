@@ -16,6 +16,42 @@ class ServerRecognitionResult {
   bool get isKnown => name != 'Unknown' && confidence > 0.6;
 }
 
+/// A single line of recognized text with its position in the image.
+class OcrLine {
+  final String text;
+  final double confidence;
+  final String lang; // 'en' or 'ar'
+
+  const OcrLine({
+    required this.text,
+    required this.confidence,
+    required this.lang,
+  });
+
+  factory OcrLine.fromJson(Map<String, dynamic> json) {
+    return OcrLine(
+      text: json['text'] as String? ?? '',
+      confidence: (json['confidence'] ?? 0.0).toDouble(),
+      lang: json['lang'] as String? ?? 'en',
+    );
+  }
+}
+
+/// Result from the server OCR (text reading) endpoint.
+class OcrResult {
+  final String text;
+  final List<OcrLine> lines;
+  final String status;
+
+  const OcrResult({
+    required this.text,
+    required this.lines,
+    required this.status,
+  });
+
+  bool get hasText => status == 'success' && text.trim().isNotEmpty;
+}
+
 /// Handles all HTTP communication with the Flask face recognition server
 class ApiService {
   static final ApiService instance = ApiService._();
@@ -137,6 +173,46 @@ class ApiService {
       debugPrint('[API] Registration error: $e');
     }
     return false;
+  }
+
+  // ── Text Reading (OCR) ───────────────────────────────────────────────────
+
+  /// Send an image to the server for OCR (Arabic + English).
+  /// Returns null if the server is unreachable.
+  Future<OcrResult?> recognizeText(Uint8List imageBytes) async {
+    try {
+      final formData = FormData.fromMap({
+        'image': MultipartFile.fromBytes(
+          imageBytes,
+          filename: 'text.jpg',
+        ),
+      });
+
+      final response = await _dio.post(
+        '$baseUrl/ocr',
+        data: formData,
+        options: Options(
+          // PaddleOCR (two language engines) is slower than face recognition.
+          receiveTimeout: const Duration(seconds: 20),
+        ),
+      );
+
+      if (response.statusCode == 200) {
+        final data = response.data;
+        final lines = (data['lines'] as List<dynamic>? ?? [])
+            .map((e) => OcrLine.fromJson(e as Map<String, dynamic>))
+            .toList();
+        return OcrResult(
+          text: data['text'] ?? '',
+          lines: lines,
+          status: data['status'] ?? 'unknown',
+        );
+      }
+    } catch (e) {
+      debugPrint('[API] OCR error: $e');
+      _isOnline = false;
+    }
+    return null;
   }
 
   // ── People ────────────────────────────────────────────────────────────────

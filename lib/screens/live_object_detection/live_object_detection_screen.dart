@@ -84,6 +84,11 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     };
 
     VoiceService.instance.onReadTextRequested = _readTextFromCamera;
+    VoiceService.instance.onTakePhotoRequested = _takePicture;
+    VoiceService.instance.onToggleFaceRecognitionRequested =
+        _toggleFaceRecognition;
+    VoiceService.instance.onOpenFaceRegistrationRequested =
+        _openFaceRegistration;
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -566,6 +571,10 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     _cleanupTimer?.cancel();
     _faceFrameThrottle?.cancel();
     FaceRecognitionService.instance.dispose();
+    VoiceService.instance.onReadTextRequested = null;
+    VoiceService.instance.onTakePhotoRequested = null;
+    VoiceService.instance.onToggleFaceRecognitionRequested = null;
+    VoiceService.instance.onOpenFaceRegistrationRequested = null;
     super.dispose();
   }
 

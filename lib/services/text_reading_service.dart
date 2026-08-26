@@ -1,61 +1,97 @@
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
-import 'package:tesseract_ocr/tesseract_ocr.dart';
-import 'package:tesseract_ocr/ocr_engine_config.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:tensorflow_demo/services/api_service.dart';
 
-/// Result of a text-reading attempt.
+/// Where a [TextReadingResult] came from.
+enum TextReadingSource {
+  /// PaddleOCR on the Flask server — supports Arabic + English.
+  server,
+
+  /// Google ML Kit on-device recognizer — English (Latin script) only.
+  /// Used as a fallback when the server is unreachable.
+  onDeviceFallback,
+}
+
+/// Normalized result of a text-reading attempt, regardless of which
+/// engine produced it.
 class TextReadingResult {
   final String text;
   final bool hasText;
+  final TextReadingSource source;
 
-  const TextReadingResult({required this.text, required this.hasText});
+  const TextReadingResult({
+    required this.text,
+    required this.hasText,
+    required this.source,
+  });
 
-  factory TextReadingResult.empty() =>
-      const TextReadingResult(text: '', hasText: false);
+  factory TextReadingResult.empty(TextReadingSource source) =>
+      TextReadingResult(text: '', hasText: false, source: source);
 }
 
-/// Handles the "read text in this photo" flow — fully on-device, no server.
+/// Handles the "read text in this photo" flow.
 ///
-/// Uses Tesseract OCR (via the `tesseract_ocr` plugin) with combined
-/// Arabic + English trained data ('ara+eng'), matching the FYP proposal's
-/// requirement to support both languages, without depending on a manually
-/// started server (per supervisor's requirement — see [face_server] which is
-/// still used for face recognition only, not for OCR).
-///
-/// Trade-off vs. the original PaddleOCR-on-server design: Tesseract is
-/// generally less accurate than PaddleOCR, especially on stylized or
-/// low-contrast text, and a bit slower per-frame. That's the accepted cost
-/// of removing the server dependency — worth calling out explicitly if asked
-/// why the proposal's PaddleOCR isn't the one actually running.
+/// Online: sends the image to the PaddleOCR server (`/ocr`), which supports
+///   both Arabic and English — matches the FYP proposal's OCR module spec.
+/// Offline: falls back to Google ML Kit's on-device text recognizer. ML Kit's
+///   on-device recognizer only supports Latin-based scripts, so this fallback
+///   is English-only — Arabic text will not be read while offline.
 class TextReadingService {
   static final TextReadingService instance = TextReadingService._();
   TextReadingService._();
 
-  static const String _language = 'ara+eng';
+  final TextRecognizer _onDeviceRecognizer = TextRecognizer(
+    script: TextRecognitionScript.latin,
+  );
 
   /// Read text from a captured photo.
+  ///
+  /// Tries the server first (best accuracy, bilingual). Falls back to the
+  /// on-device recognizer if the server can't be reached, so the feature
+  /// still works (English only) without a network/PC nearby.
   Future<TextReadingResult> readText(Uint8List imageBytes) async {
+    final serverAvailable = await ApiService.instance.forceCheckStatus();
+
+    if (serverAvailable) {
+      try {
+        final result = await ApiService.instance.recognizeText(imageBytes);
+        if (result != null && result.hasText) {
+          return TextReadingResult(
+            text: result.text,
+            hasText: true,
+            source: TextReadingSource.server,
+          );
+        }
+        if (result != null && result.status == 'no_text_detected') {
+          // Server is online and confidently found nothing — trust it,
+          // don't bother falling back to the (weaker) on-device pass.
+          return TextReadingResult.empty(TextReadingSource.server);
+        }
+      } catch (e) {
+        debugPrint('[TextReading] Server OCR error, falling back: $e');
+      }
+    }
+
+    return _readTextOnDevice(imageBytes);
+  }
+
+  Future<TextReadingResult> _readTextOnDevice(Uint8List imageBytes) async {
     File? tempFile;
     try {
       tempFile = await _writeTempFile(imageBytes);
-
-      final config = OCRConfig(
-        language: _language,
-        engine: OCREngine.tesseract,
+      final inputImage = InputImage.fromFilePath(tempFile.path);
+      final recognized = await _onDeviceRecognizer.processImage(inputImage);
+      final text = recognized.text.trim();
+      return TextReadingResult(
+        text: text,
+        hasText: text.isNotEmpty,
+        source: TextReadingSource.onDeviceFallback,
       );
-
-      final extracted = await TesseractOcr.extractText(
-        tempFile.path,
-        config: config,
-      );
-
-      final text = extracted.trim();
-      return TextReadingResult(text: text, hasText: text.isNotEmpty);
     } catch (e) {
-      debugPrint('[TextReading] OCR error: $e');
-      return TextReadingResult.empty();
+      debugPrint('[TextReading] On-device OCR error: $e');
+      return TextReadingResult.empty(TextReadingSource.onDeviceFallback);
     } finally {
       if (tempFile != null) {
         try {
@@ -66,11 +102,16 @@ class TextReadingService {
   }
 
   /// Writes image bytes to a throwaway file in the system temp directory.
-  /// Tesseract's plugin API takes a file path, not raw bytes.
+  /// ML Kit's static-image API (`InputImage.fromFilePath`) needs a file path
+  /// rather than raw bytes for already-encoded (jpg/png) images.
   Future<File> _writeTempFile(Uint8List bytes) async {
     final file = File(
       '${Directory.systemTemp.path}/envision_ocr_${DateTime.now().millisecondsSinceEpoch}.jpg',
     );
     return file.writeAsBytes(bytes, flush: true);
+  }
+
+  void dispose() {
+    _onDeviceRecognizer.close();
   }
 }

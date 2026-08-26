@@ -34,6 +34,44 @@ class _FaceRegistrationScreenState extends State<FaceRegistrationScreen> {
     super.initState();
     _initCamera();
     _loadRegisteredFaces();
+
+    VoiceService.instance.onStartCaptureRequested = _startAutoCapture;
+    VoiceService.instance.onRetakeRequested = _retake;
+    VoiceService.instance.onConfirmRegistrationRequested = _registerFace;
+    VoiceService.instance.onDeleteFaceRequested = _deleteFaceByName;
+    VoiceService.instance.onNameProvided = _setNameFromVoice;
+    VoiceService.instance.onGoBackRequested = _goBack;
+  }
+
+  void _setNameFromVoice(String name) {
+    final capitalized = name.isNotEmpty
+        ? name[0].toUpperCase() + name.substring(1)
+        : name;
+    _nameController.text = capitalized;
+    VoiceService.instance.speak('Name set to $capitalized.');
+  }
+
+  Future<void> _deleteFaceByName(String spokenName) async {
+    final target = spokenName.trim().toLowerCase();
+    final match = _registeredFaces
+        .where((f) => f.name.toLowerCase().contains(target))
+        .toList();
+    if (match.isEmpty) {
+      VoiceService.instance.speak('No registered face matches $spokenName.');
+      return;
+    }
+    await _deleteFace(match.first);
+  }
+
+  Future<void> _goBack() async {
+    try {
+      if (_cameraController?.value.isStreamingImages == true) {
+        await _cameraController?.stopImageStream();
+      }
+      await _cameraController?.dispose();
+      _cameraController = null;
+    } catch (_) {}
+    if (mounted) Navigator.pop(context);
   }
 
   Future<void> _initCamera() async {
@@ -202,6 +240,12 @@ class _FaceRegistrationScreenState extends State<FaceRegistrationScreen> {
     _cameraController?.dispose();
     _cameraController = null;
     _nameController.dispose();
+    VoiceService.instance.onStartCaptureRequested = null;
+    VoiceService.instance.onRetakeRequested = null;
+    VoiceService.instance.onConfirmRegistrationRequested = null;
+    VoiceService.instance.onDeleteFaceRequested = null;
+    VoiceService.instance.onNameProvided = null;
+    VoiceService.instance.onGoBackRequested = null;
     super.dispose();
   }
 
@@ -216,16 +260,7 @@ class _FaceRegistrationScreenState extends State<FaceRegistrationScreen> {
             style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back, color: Colors.white),
-          onPressed: () async {
-            try {
-              if (_cameraController?.value.isStreamingImages == true) {
-                await _cameraController?.stopImageStream();
-              }
-              await _cameraController?.dispose();
-              _cameraController = null;
-            } catch (_) {}
-            if (mounted) Navigator.pop(context);
-          },
+          onPressed: _goBack,
         ),
       ),
       body: Column(

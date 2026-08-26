@@ -4,13 +4,29 @@ import 'package:flutter_svg/svg.dart';
 import 'package:provider/provider.dart';
 import 'package:tensorflow_demo/models/screen_params.dart';
 import 'package:tensorflow_demo/services/navigation_service.dart';
+import 'package:tensorflow_demo/services/voice_service.dart';
 import 'package:tensorflow_demo/values/app_routes.dart';
 import 'package:tensorflow_demo/values/enumerations.dart';
 
 import 'home_screen_store.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  @override
+  void initState() {
+    super.initState();
+    VoiceService.instance.onOpenCameraRequested = _openCamera;
+  }
+
+  void _openCamera() {
+    NavigationService.instance.pushNamed(AppRoutes.cameraScreen);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -22,9 +38,7 @@ class HomeScreen extends StatelessWidget {
       ),
       floatingActionButton: FloatingActionButton(
         heroTag: 'live_object_detection',
-        onPressed: () => NavigationService.instance.pushNamed(
-          AppRoutes.cameraScreen,
-        ),
+        onPressed: _openCamera,
         child: SvgPicture.asset(
           'assets/vectors/camera.svg',
           width: 28,
