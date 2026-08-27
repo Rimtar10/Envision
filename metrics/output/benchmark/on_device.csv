@@ -1,0 +1,3 @@
+capture,frames,mean_ms,median_ms,p95_ms,mean_fps,convert_ms,rotate_ms,letterbox_ms,infer_ms,parse_ms
+640 input,73,2951.3,2800.5,5009.7,0.34,11.83,45.62,3.61,2871.83,18.4
+320 input,7,611.3,747.2,782.5,1.64,12.42,32.59,0.91,562.4,2.92
