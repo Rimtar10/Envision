@@ -1,7 +1,6 @@
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:tensorflow_demo/services/api_service.dart';
 import 'package:tensorflow_demo/services/face_database_service.dart';
 import 'package:tensorflow_demo/services/face_recognition_service.dart';
 import 'package:tensorflow_demo/services/voice_service.dart';
@@ -174,39 +173,32 @@ class _FaceRegistrationScreenState extends State<FaceRegistrationScreen> {
       _status = 'Registering $name…\nThis may take a moment';
     });
 
-    // Try server registration with all photos
-    bool success = false;
     final serverOnline = await _checkServerOnline();
+    final shotCount = _capturedImages.length;
 
-    if (serverOnline) {
-      // Send all photos to server
-      try {
-        success = await ApiService.instance.register(name, _capturedImages);
-        if (success) {
-          await FaceRecognitionService.instance.refreshDatabase();
-        }
-      } catch (e) {
-        debugPrint('Server registration error: $e');
-      }
-    }
-
-    // Fall back to local registration with first photo
-    if (!success) {
-      success = await FaceRecognitionService.instance
-          .registerFaceFromBytes(_capturedImages.first, name);
-    }
+    // Enrol on the PHONE, from every captured photo. This is what makes the
+    // person recognisable with no server and no network at all.
+    // registerFaceFromPhotos also mirrors the photos to the DeepFace server
+    // when it happens to be reachable, but nothing depends on that -- it used
+    // to be the other way round, which meant anyone registered while the
+    // server was up was invisible the moment it went away.
+    final success = await FaceRecognitionService.instance
+        .registerFaceFromPhotos(_capturedImages, name);
 
     if (success) {
       VoiceService.instance.speak('$name has been registered.');
       setState(() {
-        _status =
-            '$name registered successfully with ${_capturedImages.length} photos!';
+        _status = '$name registered from $shotCount photos.\n'
+            'Works offline'
+            '${serverOnline ? " · also synced to the server" : ""}';
         _capturedImages = [];
         _nameController.clear();
       });
       await _loadRegisteredFaces();
     } else {
-      setState(() => _status = 'Registration failed. Please try again.');
+      setState(() => _status = 'Registration failed - no face was found in '
+          'the photos. Hold the phone at arm\'s length, face the camera, and '
+          'make sure the room is well lit.');
     }
 
     setState(() => _isRegistering = false);

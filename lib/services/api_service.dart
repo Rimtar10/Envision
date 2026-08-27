@@ -58,8 +58,12 @@ class ApiService {
   ApiService._();
 
   // ── Server configuration ──────────────────────────────────────────────────
-  // Change this to your PC's local IP address
-  static const String _serverIp = '192.168.1.107';
+  // Your PC's local IP on the Wi-Fi the phone is joined to. Run face_server's
+  // server.py and use the address Flask prints as "Running on http://...:5000"
+  // (NOT the "[Server] Local IP" line -- that comes from gethostbyname and can
+  // report a virtual or stale adapter). Confirm with `ipconfig` -> the Wi-Fi
+  // adapter's IPv4. This changes every time you join a different network.
+  static const String _serverIp = '10.0.0.76';
   static const int _serverPort = 5000;
   static String get baseUrl => 'http://$_serverIp:$_serverPort';
 

@@ -45,6 +45,16 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   // ── Face recognition state ──────────────────────────────────────────────
   List<FaceResult> _faceResults = [];
   bool _faceRecognitionEnabled = true;
+
+  /// Whether an unrecognised face is announced as "Person".
+  ///
+  /// The object detector already announces people with distance and direction
+  /// ("Person, 2 metres, ahead"), so this adds a second, less informative
+  /// utterance about the same human. Set to false to let the detector own
+  /// strangers entirely and reserve this voice for names -- which keeps the
+  /// audio channel clearer, and a blind user's hearing is their primary safety
+  /// sensor.
+  static const bool _announceUnknownFaces = true;
   Timer? _faceFrameThrottle;
 
   Timer? _cleanupTimer;
@@ -161,6 +171,33 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                         ],
                       ),
                     ),
+
+                    // ── What MobileFaceNet is actually looking at ───────
+                    // A 112x112 thumbnail of the exact crop being embedded.
+                    // If this shows a face, recognition is a threshold
+                    // question; if it shows a wall or a smear, it is not.
+                    if (_faceRecognitionEnabled &&
+                        FaceRecognitionService.instance.debugLastCrop != null)
+                      Positioned(
+                        top: 10,
+                        right: 12,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.white70, width: 2),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(4),
+                            child: Image.memory(
+                              FaceRecognitionService.instance.debugLastCrop!,
+                              width: 84,
+                              height: 84,
+                              gaplessPlayback: true,
+                              fit: BoxFit.cover,
+                            ),
+                          ),
+                        ),
+                      ),
 
                     // ── Server status indicator ─────────────────────────
                     Positioned(
@@ -484,12 +521,17 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
     for (final face in results) {
       if (face.isKnown && face.name != null) {
+        // Recognised: lead with the name. That is the only thing this layer
+        // knows that the object detector does not.
         if (FaceRecognitionService.instance.shouldAnnounce(face.name!)) {
-          VoiceService.instance.speak('${face.name} is here.');
+          VoiceService.instance.speak('${face.name}.');
         }
-      } else {
+      } else if (_announceUnknownFaces) {
+        // Not recognised: say "Person", never "Unknown person". Calling someone
+        // unknown is information about the app's database, not about the world,
+        // and it is not what a person walking past would want said about them.
         if (FaceRecognitionService.instance.shouldAnnounce('unknown')) {
-          VoiceService.instance.speak('Unknown person.');
+          VoiceService.instance.speak('Person.');
         }
       }
     }
@@ -721,6 +763,9 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
   Future<void> _initializeDetector() async {
     final sensorOrientation = cameras[cameraIndex].sensorOrientation;
+    // ML Kit has to be told the same rotation, or it hunts for upright faces
+    // in a sideways frame and reports none.
+    FaceRecognitionService.instance.sensorOrientation = sensorOrientation;
     final detector = await Detector.start(sensorOrientation: sensorOrientation);
     setState(() {
       _detector = detector;

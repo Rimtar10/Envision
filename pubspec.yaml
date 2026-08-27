@@ -44,7 +44,13 @@ dependencies:
   provider: ^6.1.2
   flutter_svg: ^2.0.17
   flutter_tts: ^4.0.2
-  speech_to_text: ^7.0.0
+  # PINNED to 7.3.0. Version 7.4.0 fails to compile: its own
+  # SpeechToTextPlugin.kt declares `pluginChannelName` twice, so Kotlin
+  # aborts with "Conflicting declarations" / "Overload resolution
+  # ambiguity" during :speech_to_text:compileDebugKotlin. 7.3.0 is the
+  # version every working build of this app used. Remove the pin once
+  # upstream ships a fix.
+  speech_to_text: 7.3.0
   battery_plus: ^7.0.0
   intl: ^0.20.2
   face_detection_tflite: ^1.0.0
