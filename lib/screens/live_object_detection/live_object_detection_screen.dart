@@ -53,7 +53,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
   // ── Accessibility / voice state ─────────────────────────────────────────
   bool _isListening = false;
-  bool _wakeWordEnabled = false;
   String _voiceStatus = '';
 
   @override
@@ -73,16 +72,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
     VoiceService.instance.onListeningStateChanged = (listening) {
       if (mounted) setState(() => _isListening = listening);
-    };
-
-    VoiceService.instance.onWakeWordDetected = () {
-      if (mounted) {
-        HapticFeedback.mediumImpact();
-        setState(() {
-          _voiceStatus = "I'm listening…";
-          _isListening = true;
-        });
-      }
     };
 
     VoiceService.instance.onCommandHeard = (text) {
@@ -224,61 +213,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                         ),
                       ),
 
-                    // ── Performance overlay (top-center) ────────────────
-                    if (_detector != null)
-                      Positioned(
-                        top: 10,
-                        left: 0,
-                        right: 0,
-                        child: Center(
-                          child: ValueListenableBuilder<PerfStats>(
-                            valueListenable: _detector!.perf,
-                            builder: (context, p, _) {
-                              return Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 10, vertical: 5),
-                                decoration: BoxDecoration(
-                                  color: Colors.black.withValues(alpha: 0.6),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Text(
-                                      '${p.fps.toStringAsFixed(1)} FPS  •  '
-                                      '${p.lastInferenceMs.toStringAsFixed(0)} ms  •  '
-                                      '${p.detections} obj',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                    // Where the frame budget actually goes.
-                                    // If 'pre' rivals or beats 'model', the
-                                    // bottleneck is moving pixels around in
-                                    // Dart, not the detectors — and no model
-                                    // swap will fix it.
-                                    if (p.preprocessMs > 0)
-                                      Text(
-                                        'pre ${p.preprocessMs.toStringAsFixed(0)}  '
-                                        'model ${p.modelMs.toStringAsFixed(0)}',
-                                        style: TextStyle(
-                                          color: p.preprocessMs > p.modelMs
-                                              ? Colors.orangeAccent
-                                              : Colors.white70,
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              );
-                            },
-                          ),
-                        ),
-                      ),
-
                     // ── Voice status banner (bottom of camera area) ─────
                     if (_voiceStatus.isNotEmpty)
                       Positioned(
@@ -405,17 +339,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                   ),
                 ),
               ),
-              const SizedBox(width: 12),
-              Semantics(
-                label: 'Flip camera',
-                button: true,
-                child: _ControlButton(
-                  icon: null,
-                  svgAsset: 'assets/vectors/repeate-music.svg',
-                  onTap: _flipCamera,
-                  size: 56,
-                ),
-              ),
             ],
           ),
 
@@ -483,27 +406,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                 label: 'Register Face',
                 color: Colors.purple.shade700,
                 onTap: _openFaceRegistration,
-              ),
-            ),
-          ),
-
-          const SizedBox(height: 8),
-
-          // ── Wake-word toggle row ────────────────────────────────────────
-          SizedBox(
-            width: double.infinity,
-            child: Semantics(
-              label: _wakeWordEnabled
-                  ? "Wake word active — say Envision"
-                  : "Enable wake word — say Envision to activate",
-              button: true,
-              child: _SecondaryButton(
-                icon: _wakeWordEnabled ? Icons.hearing : Icons.hearing_disabled,
-                label: _wakeWordEnabled ? 'Wake: ON' : 'Wake: OFF',
-                color: _wakeWordEnabled
-                    ? Colors.green.shade700
-                    : Colors.white24,
-                onTap: _toggleWakeWord,
               ),
             ),
           ),
@@ -640,23 +542,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     }
   }
 
-  Future<void> _toggleWakeWord() async {
-    final next = !_wakeWordEnabled;
-    setState(() => _wakeWordEnabled = next);
-    await VoiceService.instance.setWakeWordEnabled(next);
-    HapticFeedback.selectionClick();
-
-    final msg = next
-        ? "Wake word enabled. Say 'Envision' to give a command."
-        : 'Wake word disabled.';
-    VoiceService.instance.speak(msg);
-    if (mounted) {
-      setState(() => _voiceStatus = msg);
-      Future.delayed(const Duration(seconds: 4),
-          () => mounted ? setState(() => _voiceStatus = '') : null);
-    }
-  }
-
   // ─────────────────────────────────────────────────────────────────────────
   // LIFECYCLE
   // ─────────────────────────────────────────────────────────────────────────
@@ -694,7 +579,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     VoiceService.instance.onTakePhotoRequested = null;
     VoiceService.instance.onToggleFaceRecognitionRequested = null;
     VoiceService.instance.onOpenFaceRegistrationRequested = null;
-    VoiceService.instance.onWakeWordDetected = null;
     super.dispose();
   }
 
@@ -707,7 +591,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     _isInitializing = true;
     try {
       var modelReady = false;
-      var voiceReady = false;
 
       try {
         await TensorflowService.ssdMobileNet.ensureInitialized();
@@ -720,7 +603,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
       try {
         await VoiceService.instance.ensureInitialized();
-        voiceReady = true;
       } catch (e) {
         message = 'Voice features unavailable: $e';
         if (mounted) setState(() {});
@@ -763,18 +645,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
           // Speak welcome message once camera is fully ready
           VoiceService.instance.speakWelcome();
         }
-      }
-
-      // Wake word is deliberately OFF by default.
-      //
-      // The poller keeps an Android SpeechRecognizer session open almost
-      // continuously, which (a) competes with obstacle announcements for the
-      // mic, (b) streams ambient audio to a cloud ASR, and (c) drains battery.
-      // The user enables it from the 'Wake: OFF' button when they want it.
-      // Replace the polling loop with an on-device wake-word engine
-      // (Porcupine / openWakeWord) before considering enabling this by default.
-      if (voiceReady) {
-        if (mounted) setState(() => _wakeWordEnabled = false);
       }
     } finally {
       _isInitializing = false;
@@ -864,32 +734,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   // ─────────────────────────────────────────────────────────────────────────
   // CAMERA ACTIONS
   // ─────────────────────────────────────────────────────────────────────────
-
-  void _flipCamera() {
-    if (cameras.length <= 1) {
-      VoiceService.instance.speak('Only one camera available.');
-      return;
-    }
-    cameraIndex = cameraIndex == 1 ? 0 : 1;
-    try {
-      _cameraController?.stopImageStream();
-    } catch (_) {}
-    _cameraController?.dispose();
-    _cameraController = CameraController(
-      cameras[cameraIndex],
-      ResolutionPreset.medium, // balance: sharper than low, far cheaper than high; the model still
-      // letterboxes to 640 so detection is unchanged. Drop to .medium/.low if a
-      // low-end device (e.g. Galaxy Tab A7) can't hold preview+stream at high.
-      enableAudio: false,
-    )..initialize().then((_) async {
-        await _cameraController?.startImageStream(onLatestImageAvailable);
-        ScreenParams.previewSize =
-            _cameraController?.value.previewSize ?? ScreenParams.previewSize;
-        if (mounted) setState(() {});
-      }).catchError((e) {
-      log('Failed to flip camera: $e');
-    });
-  }
 
   Future<void> _takePicture() async {
     VoiceService.instance.speak('Taking photo.');
