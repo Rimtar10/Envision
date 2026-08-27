@@ -9,7 +9,9 @@ import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:tensorflow_demo/models/detected_object/detected_object_dm.dart';
 import 'package:tensorflow_demo/models/screen_params.dart';
+import 'package:tensorflow_demo/screens/face_registration/face_registration_screen.dart';
 import 'package:tensorflow_demo/services/detector.dart';
+import 'package:tensorflow_demo/services/face_recognition_service.dart';
 import 'package:tensorflow_demo/services/tensorflow_service.dart';
 import 'package:tensorflow_demo/services/navigation_service.dart';
 import 'package:tensorflow_demo/services/voice_service.dart';
@@ -40,8 +42,14 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
   List<DetectedObjectDm>? detectedObjectList;
 
+  // ── Face recognition state ──────────────────────────────────────────────
+  List<FaceResult> _faceResults = [];
+  bool _faceRecognitionEnabled = true;
+  Timer? _faceFrameThrottle;
+
   Timer? _cleanupTimer;
   bool _isInitializing = false;
+  bool _returningFromRegistration = false;
 
   // ── Accessibility / voice state ─────────────────────────────────────────
   bool _isListening = false;
@@ -58,13 +66,11 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     );
     _init();
 
-    // Periodic cleanup of stale TTS cooldowns
     _cleanupTimer = Timer.periodic(
       const Duration(seconds: 10),
       (_) => VoiceService.instance.cleanupCooldowns(),
     );
 
-    // ── Wire callbacks ──────────────────────────────────────────────────
     VoiceService.instance.onListeningStateChanged = (listening) {
       if (mounted) setState(() => _isListening = listening);
     };
@@ -87,6 +93,13 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
         });
       }
     };
+
+    VoiceService.instance.onReadTextRequested = _readTextFromCamera;
+    VoiceService.instance.onTakePhotoRequested = _takePicture;
+    VoiceService.instance.onToggleFaceRecognitionRequested =
+        _toggleFaceRecognition;
+    VoiceService.instance.onOpenFaceRegistrationRequested =
+        _openFaceRegistration;
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -95,8 +108,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // CRITICAL: ScreenParams.screenSize drives renderLocation scaling for all
-    // bounding boxes. HomeScreen used to set this; now camera screen does it.
     ScreenParams.screenSize = MediaQuery.sizeOf(context);
 
     final controller = _cameraController;
@@ -123,55 +134,84 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
     return Scaffold(
       backgroundColor: Colors.black,
-      // No AppBar — visually impaired users should never accidentally trigger
-      // a back navigation. The app is intentionally a single-screen experience.
       body: SafeArea(
         child: Column(
           children: [
-            // ── Camera + overlays (full remaining height) ───────────────
             Expanded(
               child: GestureDetector(
-                // Single tap anywhere on the camera → activate mic
                 onTap: _onCameraAreaTap,
-                // Double tap → immediately describe the full scene
                 onDoubleTap: _onCameraAreaDoubleTap,
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    // Camera preview
                     AspectRatio(
                       aspectRatio: 1 / controller.value.aspectRatio,
                       child: Stack(
                         fit: StackFit.expand,
                         children: [
                           CameraPreview(controller),
-                          // Bounding boxes
+
+                          // ── Object detection bounding boxes ──────────
                           ...?detectedObjectList?.map(
                             (obj) => Positioned.fromRect(
                               rect: obj.renderLocation,
                               child: BoxWidget.fromDetectedObject(obj),
                             ),
                           ),
+
+                          // ── Face recognition bounding boxes ──────────
+                          ..._faceResults.map(
+                            (face) => Positioned.fromRect(
+                              rect: face.boundingBox,
+                              child: _FaceBox(
+                                name: face.name,
+                                isKnown: face.isKnown,
+                              ),
+                            ),
+                          ),
                         ],
                       ),
                     ),
 
-                    // ── Wake-word indicator (top-left) ──────────────────
+                    // ── Server status indicator ─────────────────────────
                     Positioned(
                       top: 10,
                       left: 12,
-                      child: AnimatedOpacity(
-                        opacity: _wakeWordEnabled ? 1.0 : 0.0,
-                        duration: const Duration(milliseconds: 300),
-                        child: _StatusPill(
-                          icon: Icons.hearing,
-                          label: "Say 'Envision'",
-                          color: Colors.green.shade700,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.black54,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 8,
+                              height: 8,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: FaceRecognitionService
+                                        .instance.isServerOnline
+                                    ? Colors.green
+                                    : Colors.grey,
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              FaceRecognitionService.instance.isServerOnline
+                                  ? 'DeepFace'
+                                  : 'Offline',
+                              style: const TextStyle(
+                                  color: Colors.white, fontSize: 10),
+                            ),
+                          ],
                         ),
                       ),
                     ),
 
-                    // ── Listening indicator (top-right) ─────────────────
+                    // ── Listening indicator ─────────────────────────────
                     if (_isListening)
                       Positioned(
                         top: 10,
@@ -276,8 +316,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                 ),
               ),
             ),
-
-            // ── Accessible bottom bar ──────────────────────────────────
             _buildAccessibleBottomBar(),
           ],
         ),
@@ -287,10 +325,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
   // ─────────────────────────────────────────────────────────────────────────
   // BOTTOM CONTROL BAR
-  // Designed for visually impaired users:
-  //  • Large tap targets (min 64 px)
-  //  • Mic button dominates the centre
-  //  • All buttons are Semantics-labelled for screen readers
   // ─────────────────────────────────────────────────────────────────────────
 
   Widget _buildAccessibleBottomBar() {
@@ -303,7 +337,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
           // ── Main mic row ──────────────────────────────────────────────
           Row(
             children: [
-              // Gallery
               Semantics(
                 label: 'Analyse a photo from gallery',
                 button: true,
@@ -314,10 +347,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                   size: 56,
                 ),
               ),
-
               const SizedBox(width: 12),
-
-              // ── Primary mic button (largest, centre) ──────────────────
               Expanded(
                 child: Semantics(
                   label: _isListening
@@ -341,33 +371,41 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                           width: 2,
                         ),
                       ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            _isListening ? Icons.mic : Icons.mic_none,
-                            color: Colors.white,
-                            size: 28,
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            _isListening ? 'Listening…' : 'Tap to Speak',
-                            style: const TextStyle(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              _isListening ? Icons.mic : Icons.mic_none,
                               color: Colors.white,
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
+                              size: 28,
                             ),
-                          ),
-                        ],
+                            const SizedBox(width: 8),
+                            Flexible(
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Text(
+                                  _isListening
+                                      ? 'Listening…'
+                                      : 'Tap to Speak',
+                                  maxLines: 1,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
                 ),
               ),
-
               const SizedBox(width: 12),
-
-              // Flip camera
               Semantics(
                 label: 'Flip camera',
                 button: true,
@@ -383,10 +421,9 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
           const SizedBox(height: 10),
 
-          // ── Secondary row: take photo + wake word toggle ──────────────
+          // ── Secondary row: Analyse Photo + Read Text + Face ON/OFF ────
           Row(
             children: [
-              // Take photo for analysis
               Expanded(
                 child: Semantics(
                   label: 'Take photo and analyse objects',
@@ -398,44 +435,162 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                   ),
                 ),
               ),
-
               const SizedBox(width: 12),
-
-              // Wake-word toggle
               Expanded(
                 child: Semantics(
-                  label: _wakeWordEnabled
-                      ? "Wake word active — say Envision"
-                      : "Enable wake word — say Envision to activate",
+                  label: 'Read text from camera, Arabic or English',
                   button: true,
                   child: _SecondaryButton(
-                    icon: _wakeWordEnabled
-                        ? Icons.hearing
-                        : Icons.hearing_disabled,
-                    label: _wakeWordEnabled ? 'Wake: ON' : 'Wake: OFF',
-                    color: _wakeWordEnabled
-                        ? Colors.green.shade700
+                    icon: Icons.text_fields,
+                    label: 'Read Text',
+                    color: Colors.teal.shade700,
+                    onTap: _readTextFromCamera,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Semantics(
+                  label: _faceRecognitionEnabled
+                      ? 'Face recognition on'
+                      : 'Face recognition off',
+                  button: true,
+                  child: _SecondaryButton(
+                    icon: _faceRecognitionEnabled
+                        ? Icons.face
+                        : Icons.face_retouching_off,
+                    label: _faceRecognitionEnabled ? 'Face: ON' : 'Face: OFF',
+                    color: _faceRecognitionEnabled
+                        ? Colors.blue.shade700
                         : Colors.white24,
-                    onTap: _toggleWakeWord,
+                    onTap: _toggleFaceRecognition,
                   ),
                 ),
               ),
             ],
           ),
 
-          // ── Hint text ─────────────────────────────────────────────────
           const SizedBox(height: 8),
-          Text(
-            'Tap camera area once to speak  •  Double-tap to describe scene',
-            style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.45),
-              fontSize: 11,
+
+          // ── Register row ──────────────────────────────────────────────
+          SizedBox(
+            width: double.infinity,
+            child: Semantics(
+              label: 'Register a new face',
+              button: true,
+              child: _SecondaryButton(
+                icon: Icons.person_add,
+                label: 'Register Face',
+                color: Colors.purple.shade700,
+                onTap: _openFaceRegistration,
+              ),
             ),
-            textAlign: TextAlign.center,
+          ),
+
+          const SizedBox(height: 8),
+
+          // ── Wake-word toggle row ────────────────────────────────────────
+          SizedBox(
+            width: double.infinity,
+            child: Semantics(
+              label: _wakeWordEnabled
+                  ? "Wake word active — say Envision"
+                  : "Enable wake word — say Envision to activate",
+              button: true,
+              child: _SecondaryButton(
+                icon: _wakeWordEnabled ? Icons.hearing : Icons.hearing_disabled,
+                label: _wakeWordEnabled ? 'Wake: ON' : 'Wake: OFF',
+                color: _wakeWordEnabled
+                    ? Colors.green.shade700
+                    : Colors.white24,
+                onTap: _toggleWakeWord,
+              ),
+            ),
           ),
         ],
       ),
     );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // FACE RECOGNITION
+  // ─────────────────────────────────────────────────────────────────────────
+
+  void _toggleFaceRecognition() {
+    setState(() => _faceRecognitionEnabled = !_faceRecognitionEnabled);
+    if (!_faceRecognitionEnabled) {
+      setState(() => _faceResults = []);
+    }
+    VoiceService.instance.speak(
+      _faceRecognitionEnabled
+          ? 'Face recognition enabled.'
+          : 'Face recognition disabled.',
+    );
+  }
+
+  void _openFaceRegistration() async {
+    // Stop everything
+    _faceFrameThrottle?.cancel();
+    _faceFrameThrottle = null;
+    _objectDetectorStream?.cancel();
+    _objectDetectorStream = null;
+    _detector?.stop();
+    _detector = null;
+
+    try {
+      if (_cameraController?.value.isStreamingImages == true) {
+        await _cameraController?.stopImageStream();
+      }
+      await _cameraController?.dispose();
+      _cameraController = null;
+    } catch (_) {}
+
+    if (mounted) setState(() => _faceResults = []);
+    if (!mounted) return;
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const FaceRegistrationScreen()),
+    );
+
+    if (!mounted) return;
+
+    await FaceRecognitionService.instance.refreshDatabase();
+
+    // Give camera hardware time to fully release
+    await Future.delayed(const Duration(seconds: 2));
+
+    if (!mounted) return;
+
+    // Full reinitialize
+    _isInitializing = false;
+    _returningFromRegistration = true;
+    FaceRecognitionService.instance.dispose();
+    await _init();
+    _returningFromRegistration = false;
+  }
+
+  Future<void> _processFaceFrame(CameraImage cameraImage) async {
+    if (!_faceRecognitionEnabled) return;
+    if (!FaceRecognitionService.instance.isInitialized) return;
+
+    final results =
+        await FaceRecognitionService.instance.processFrame(cameraImage);
+
+    if (!mounted) return;
+    setState(() => _faceResults = results);
+
+    for (final face in results) {
+      if (face.isKnown && face.name != null) {
+        if (FaceRecognitionService.instance.shouldAnnounce(face.name!)) {
+          VoiceService.instance.speak('${face.name} is here.');
+        }
+      } else {
+        if (FaceRecognitionService.instance.shouldAnnounce('unknown')) {
+          VoiceService.instance.speak('Unknown person.');
+        }
+      }
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -445,13 +600,12 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   Future<void> _onCameraAreaTap() async {
     HapticFeedback.lightImpact();
     final voice = VoiceService.instance;
-    // Tapping the camera area ALWAYS starts a command session.
-    // If already in a command session, stop it first then restart.
     if (voice.isCommandListening) await voice.stopListening();
     HapticFeedback.mediumImpact();
     await voice.startListening((unrecognized) {
       if (mounted) {
-        setState(() => _voiceStatus = 'Not understood — say "help" for commands.');
+        setState(
+            () => _voiceStatus = 'Not understood — say "help" for commands.');
         Future.delayed(const Duration(seconds: 4),
             () => mounted ? setState(() => _voiceStatus = '') : null);
       }
@@ -460,7 +614,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
   Future<void> _onCameraAreaDoubleTap() async {
     HapticFeedback.mediumImpact();
-    // Describe the scene immediately on double-tap
     await VoiceService.instance.stopListening();
     await VoiceService.instance.describeScene();
     if (mounted) {
@@ -472,16 +625,14 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
   Future<void> _toggleVoiceCommand() async {
     final voice = VoiceService.instance;
-    // Use isCommandListening — NOT isListening, which is true during
-    // background wake-word polling and would break the toggle logic.
     if (voice.isCommandListening) {
       await voice.stopListening();
     } else {
       HapticFeedback.mediumImpact();
       await voice.startListening((unrecognized) {
         if (mounted) {
-          setState(() =>
-              _voiceStatus = 'Not understood — say "help" for commands.');
+          setState(
+              () => _voiceStatus = 'Not understood — say "help" for commands.');
           Future.delayed(const Duration(seconds: 4),
               () => mounted ? setState(() => _voiceStatus = '') : null);
         }
@@ -514,12 +665,15 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
   void _onInactive() {
     try {
-      _cameraController?.stopImageStream();
+      if (_cameraController?.value.isStreamingImages == true) {
+        _cameraController?.stopImageStream();
+      }
     } catch (_) {}
     _objectDetectorStream?.cancel();
     _objectDetectorStream = null;
     _detector?.stop();
     _detector = null;
+    _faceFrameThrottle?.cancel();
   }
 
   @override
@@ -534,7 +688,13 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     _objectDetectorStream = null;
     _detector?.stop();
     _cleanupTimer?.cancel();
-    // Leave wake word state as-is — the screen is the whole app.
+    _faceFrameThrottle?.cancel();
+    FaceRecognitionService.instance.dispose();
+    VoiceService.instance.onReadTextRequested = null;
+    VoiceService.instance.onTakePhotoRequested = null;
+    VoiceService.instance.onToggleFaceRecognitionRequested = null;
+    VoiceService.instance.onOpenFaceRegistrationRequested = null;
+    VoiceService.instance.onWakeWordDetected = null;
     super.dispose();
   }
 
@@ -566,13 +726,21 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
         if (mounted) setState(() {});
       }
 
+      try {
+        await FaceRecognitionService.instance.initialize();
+      } catch (e) {
+        debugPrint('[FaceRecognition] Init failed: $e');
+      }
+
       final hasPermission = await _requestPermissions();
       if (!hasPermission) return;
 
-      if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      if (_cameraController == null ||
+          !_cameraController!.value.isInitialized) {
         await _initializeCamera();
       }
-      if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      if (_cameraController == null ||
+          !_cameraController!.value.isInitialized) {
         return;
       }
 
@@ -591,8 +759,10 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
       if (mounted) {
         setState(() {});
-        // Speak welcome message once camera is fully ready
-        VoiceService.instance.speakWelcome();
+        if (!_returningFromRegistration) {
+          // Speak welcome message once camera is fully ready
+          VoiceService.instance.speakWelcome();
+        }
       }
 
       // Wake word is deliberately OFF by default.
@@ -616,8 +786,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     final micStatus = await Permission.microphone.status;
     if (cameraStatus.isGranted && micStatus.isGranted) return true;
 
-    final results =
-        await [Permission.camera, Permission.microphone].request();
+    final results = await [Permission.camera, Permission.microphone].request();
     final cameraOk = results[Permission.camera]?.isGranted ?? false;
     final micOk = results[Permission.microphone]?.isGranted ?? false;
 
@@ -685,8 +854,7 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     final detector = await Detector.start(sensorOrientation: sensorOrientation);
     setState(() {
       _detector = detector;
-      _objectDetectorStream =
-          detector.resultsStream.listen((detectedObjects) {
+      _objectDetectorStream = detector.resultsStream.listen((detectedObjects) {
         if (mounted) setState(() => detectedObjectList = detectedObjects);
         VoiceService.instance.announceDetections(detectedObjects);
       });
@@ -736,6 +904,20 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     }
   }
 
+  Future<void> _readTextFromCamera() async {
+    if (!mounted) return;
+    VoiceService.instance.speak('Taking photo.');
+    try {
+      await _cameraController?.stopImageStream();
+    } catch (_) {}
+    final captured = await _cameraController?.takePicture();
+    final bytes = await captured?.readAsBytes();
+    if (bytes != null && bytes.isNotEmpty) {
+      NavigationService.instance
+          .pushNamed(AppRoutes.textReadingScreen, arguments: bytes);
+    }
+  }
+
   Future<void> _pickImageFromGallery() async {
     final result = await _imagePicker.pickImage(source: ImageSource.gallery);
     final bytes = await result?.readAsBytes();
@@ -750,6 +932,51 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     final controller = _cameraController;
     if (controller == null || !controller.value.isInitialized) return;
     _detector?.processFrame(cameraImage);
+
+    _faceFrameThrottle ??= Timer(const Duration(milliseconds: 500), () {
+      _faceFrameThrottle = null;
+      _processFaceFrame(cameraImage);
+    });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FACE BOX WIDGET
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _FaceBox extends StatelessWidget {
+  const _FaceBox({required this.name, required this.isKnown});
+
+  final String? name;
+  final bool isKnown;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = isKnown ? Colors.green : Colors.red;
+    final label = isKnown ? (name ?? 'Unknown') : 'Unknown';
+
+    return Container(
+      decoration: BoxDecoration(
+        border: Border.all(color: color, width: 2),
+      ),
+      child: Align(
+        alignment: Alignment.topLeft,
+        child: Container(
+          color: color,
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -757,7 +984,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 // HELPER WIDGETS
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Small rounded pill with icon + label (wake word / listening indicators).
 class _StatusPill extends StatefulWidget {
   const _StatusPill({
     required this.icon,
@@ -811,9 +1037,7 @@ class _StatusPillState extends State<_StatusPill>
           Text(
             widget.label,
             style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w600),
+                color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
           ),
         ],
       ),
@@ -824,7 +1048,6 @@ class _StatusPillState extends State<_StatusPill>
   }
 }
 
-/// Square icon button for the bottom bar.
 class _ControlButton extends StatelessWidget {
   const _ControlButton({
     required this.onTap,
@@ -854,8 +1077,8 @@ class _ControlButton extends StatelessWidget {
               ? SvgPicture.asset(svgAsset!,
                   width: 26,
                   height: 26,
-                  colorFilter: const ColorFilter.mode(
-                      Colors.white, BlendMode.srcIn))
+                  colorFilter:
+                      const ColorFilter.mode(Colors.white, BlendMode.srcIn))
               : Icon(icon, color: Colors.white, size: 26),
         ),
       ),
@@ -863,7 +1086,6 @@ class _ControlButton extends StatelessWidget {
   }
 }
 
-/// Wide secondary button with icon + text label.
 class _SecondaryButton extends StatelessWidget {
   const _SecondaryButton({
     required this.icon,
@@ -887,19 +1109,26 @@ class _SecondaryButton extends StatelessWidget {
           color: color ?? Colors.white.withValues(alpha: 0.12),
           borderRadius: BorderRadius.circular(12),
         ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, color: Colors.white, size: 20),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600),
-            ),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, color: Colors.white, size: 18),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

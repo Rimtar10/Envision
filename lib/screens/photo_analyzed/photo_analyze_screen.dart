@@ -27,6 +27,19 @@ class _PhotoAnalyzedScreenState extends State<PhotoAnalyzedScreen> {
       _analyzeImage();
     });
     super.initState();
+    VoiceService.instance.onReadAgainRequested = () => _announceResults(detectedObjectList);
+    VoiceService.instance.onGoBackRequested = _goBack;
+  }
+
+  @override
+  void dispose() {
+    VoiceService.instance.onReadAgainRequested = null;
+    VoiceService.instance.onGoBackRequested = null;
+    super.dispose();
+  }
+
+  void _goBack() {
+    if (mounted) Navigator.pop(context);
   }
 
   @override

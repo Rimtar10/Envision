@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:tensorflow_demo/models/detected_object/detected_object_dm.dart';
 import 'package:battery_plus/battery_plus.dart';
 import 'package:intl/intl.dart';
+import 'package:tensorflow_demo/services/mistral_service.dart';
 
 class VoiceService {
   static final VoiceService instance = VoiceService._();
@@ -20,6 +21,7 @@ class VoiceService {
 
   // ── Cooldown tracking ────────────────────────────────────────────────────
   final Map<String, DateTime> _lastAnnounced = {};
+
   /// Global floor: no detection announcement fires sooner than this after the last one.
   DateTime? _lastAnnouncementTime;
   static const _minAnnouncementInterval = Duration(seconds: 3);
@@ -27,12 +29,14 @@ class VoiceService {
   // ── Hazard-interrupt tracking ────────────────────────────────────────────
   /// Distance (metres) of the most recently announced object.
   double? _lastAnnouncedDistance;
+
   /// Guards against back-to-back hazard overrides (max one every 2 s).
   DateTime? _lastHazardOverrideTime;
 
   // ── Path-clear tracking ───────────────────────────────────────────────────
   /// True once we've said "path seems clear" so we don't repeat it.
   bool _pathClearAnnounced = false;
+
   /// Last time any detection was seen (used for path-clear timing).
   DateTime? _lastDetectionTime;
 
@@ -45,6 +49,13 @@ class VoiceService {
   bool _inConversation = false;
   Timer? _wakeWordTimer;
 
+  /// Consecutive polls that ended almost instantly (< 1.2s) with nothing
+  /// heard — a sign something is wrong (usually missing mic permission)
+  /// rather than just silence. Used to back off instead of hammering the
+  /// mic (and its start/stop beep) every ~800ms forever.
+  int _consecutiveFastFailures = 0;
+  static const _maxFastFailuresBeforeBackoff = 3;
+
   // ── Conversation context ─────────────────────────────────────────────────
   String? _lastResponse;
 
@@ -55,8 +66,53 @@ class VoiceService {
   // ── Callbacks ────────────────────────────────────────────────────────────
   void Function(bool isListening)? onListeningStateChanged;
   void Function()? onWakeWordDetected;
+
   /// Called with a human-readable summary of the last heard command (for UI display)
   void Function(String text)? onCommandHeard;
+
+  /// Called when the user asks to read text ("read text", "what does this say", …).
+  /// The screen owns the camera, so it's the one that actually captures the
+  /// photo and navigates to the text-reading flow.
+  void Function()? onReadTextRequested;
+
+  // ── Screen-specific voice actions ────────────────────────────────────────
+  // Each of these mirrors [onReadTextRequested]: the currently-mounted screen
+  // sets the callback it can serve, and _parseVoiceCommand fires whichever
+  // one is registered. Only one screen is visible at a time, so there's no
+  // ambiguity about which handler should run.
+
+  /// Camera screen: take a photo and analyse it for objects.
+  void Function()? onTakePhotoRequested;
+
+  /// Camera screen: toggle face recognition on/off.
+  void Function()? onToggleFaceRecognitionRequested;
+
+  /// Camera screen: navigate to the face-registration flow.
+  void Function()? onOpenFaceRegistrationRequested;
+
+  /// Home screen: navigate to the live camera screen.
+  void Function()? onOpenCameraRequested;
+
+  /// Face registration screen: begin the auto-capture sequence.
+  void Function()? onStartCaptureRequested;
+
+  /// Face registration screen: retake the captured photos.
+  void Function()? onRetakeRequested;
+
+  /// Face registration screen: confirm/submit the registration.
+  void Function()? onConfirmRegistrationRequested;
+
+  /// Face registration screen: delete a registered face by spoken name.
+  void Function(String name)? onDeleteFaceRequested;
+
+  /// Face registration screen: fill the name field from a spoken name.
+  void Function(String name)? onNameProvided;
+
+  /// Text reading / photo analysis screens: re-speak the last result.
+  void Function()? onReadAgainRequested;
+
+  /// Any screen: go back to the previous screen.
+  void Function()? onGoBackRequested;
 
   // ── Command vs wake-word listening ───────────────────────────────────────
   // The wake-word polling loop keeps _stt busy in the background.
@@ -259,12 +315,12 @@ class VoiceService {
     // ── Hazard override ───────────────────────────────────────────────────
     // If TTS is mid-sentence but a significantly closer hazard just appeared
     // (35% nearer, under 2 m, max one override every 2 s) — cut the speech.
-    final hazardOverride = _isSpeaking
-        && meters > 0
-        && meters < 2.0
-        && _lastAnnouncedDistance != null
-        && meters < _lastAnnouncedDistance! * 0.65
-        && (_lastHazardOverrideTime == null ||
+    final hazardOverride = _isSpeaking &&
+        meters > 0 &&
+        meters < 2.0 &&
+        _lastAnnouncedDistance != null &&
+        meters < _lastAnnouncedDistance! * 0.65 &&
+        (_lastHazardOverrideTime == null ||
             now.difference(_lastHazardOverrideTime!) >
                 const Duration(seconds: 2));
 
@@ -432,10 +488,10 @@ class VoiceService {
   /// between repeats — the global _minAnnouncementInterval handles fast firing.
   int _dynamicCooldown(double meters) {
     if (meters < 0) return 6;
-    if (meters < 0.8) return 3;   // very close  — re-announce every 3 s
-    if (meters < 2.0) return 4;   // close        — every 4 s
-    if (meters < 4.0) return 6;   // ahead        — every 6 s
-    return 9;                      // far           — every 9 s
+    if (meters < 0.8) return 3; // very close  — re-announce every 3 s
+    if (meters < 2.0) return 4; // close        — every 4 s
+    if (meters < 4.0) return 6; // ahead        — every 6 s
+    return 9; // far           — every 9 s
   }
 
   /// Compose the spoken phrase with capitalized label and natural word order.
@@ -443,9 +499,8 @@ class VoiceService {
   ///           "Warning! Chair right in front of you"
   ///           "Car far ahead"
   String _buildDistancePhrase(String label, double meters, String position) {
-    final cap = label.isNotEmpty
-        ? label[0].toUpperCase() + label.substring(1)
-        : label;
+    final cap =
+        label.isNotEmpty ? label[0].toUpperCase() + label.substring(1) : label;
     if (meters < 0) return '$cap, $position';
     if (meters < 0.8) return '$cap right in front of you';
     if (meters < 10.0) return '$cap, ${_spokenDistance(meters)}, $position';
@@ -521,22 +576,44 @@ class VoiceService {
     }
   }
 
-  void _scheduleWakeWordPoll() {
+  void _scheduleWakeWordPoll([Duration delay = const Duration(milliseconds: 800)]) {
     _wakeWordTimer?.cancel();
     // Small delay so any current STT session fully releases the mic
-    _wakeWordTimer = Timer(const Duration(milliseconds: 800), _pollWakeWord);
+    _wakeWordTimer = Timer(delay, _pollWakeWord);
+  }
+
+  /// Delay used for the next poll after a fast-failure streak. Grows with
+  /// each consecutive fast failure (capped) so a persistent problem (e.g.
+  /// missing mic permission) doesn't spam the mic's start/stop beep.
+  Duration _backoffDelay() {
+    if (_consecutiveFastFailures < _maxFastFailuresBeforeBackoff) {
+      return const Duration(milliseconds: 800);
+    }
+    final extra = _consecutiveFastFailures - _maxFastFailuresBeforeBackoff;
+    final seconds = (2 << extra.clamp(0, 4)); // 2,4,8,16,32s
+    return Duration(seconds: seconds.clamp(2, 30));
   }
 
   Future<void> _pollWakeWord() async {
-    if (!_wakeWordEnabled || _inConversation || _isSpeaking || _stt.isListening) {
+    if (!_wakeWordEnabled ||
+        _inConversation ||
+        _isSpeaking ||
+        _stt.isListening) {
       // Try again later
       _scheduleWakeWordPoll();
       return;
     }
 
-    if (!_stt.isAvailable) return;
+    if (!_stt.isAvailable) {
+      // Recognizer isn't ready (often means no mic permission). Back off
+      // instead of retrying every 800ms.
+      _consecutiveFastFailures++;
+      _scheduleWakeWordPoll(_backoffDelay());
+      return;
+    }
 
     bool detected = false;
+    final startedAt = DateTime.now();
 
     try {
       await _stt.listen(
@@ -558,10 +635,18 @@ class VoiceService {
       print('[WakeWord] STT error during poll: $e');
     }
 
+    final elapsed = DateTime.now().difference(startedAt);
+    if (!detected && elapsed < const Duration(milliseconds: 1200)) {
+      // The session ended almost instantly — likely an error, not silence.
+      _consecutiveFastFailures++;
+    } else {
+      _consecutiveFastFailures = 0;
+    }
+
     // Next poll is scheduled by the onStatus callback ('done'/'notListening')
     // to ensure the mic is free. The fallback timer handles edge cases.
     if (!detected) {
-      _scheduleWakeWordPoll();
+      _scheduleWakeWordPoll(_backoffDelay());
     }
   }
 
@@ -581,8 +666,10 @@ class VoiceService {
     Timer.periodic(const Duration(milliseconds: 200), (timer) {
       if (!_isSpeaking) {
         timer.cancel();
+        // The fallback spoken message is now handled centrally in
+        // _parseVoiceCommand's UNRECOGNIZED branch, so this callback only
+        // needs to update the on-screen log.
         startListening((unrecognized) {
-          _speak("Sorry, I didn't catch that. Try saying 'help' for a list of commands.");
           onCommandHeard?.call('Unrecognized: $unrecognized');
         });
       }
@@ -643,9 +730,11 @@ class VoiceService {
   // ─────────────────────────────────────────────────────────────────────────
 
   Future<void> _parseVoiceCommand(
-      String command, Function(String) onUnrecognized) async {
+      String command, Function(String) onUnrecognized,
+      {bool isRetry = false}) async {
     // ── STOP / CANCEL ────────────────────────────────────────────────────
-    if (_matchesAny(command, ['stop', 'cancel', 'quiet', 'silence', 'shut up'])) {
+    if (_matchesAny(
+        command, ['stop', 'cancel', 'quiet', 'silence', 'shut up'])) {
       await stopSpeaking();
       _speak('Stopped.');
       _lastResponse = 'Stopped';
@@ -667,13 +756,31 @@ class VoiceService {
       await tellTime();
     }
     // ── BATTERY ──────────────────────────────────────────────────────────
-    else if (_matchesAny(command,
-        ['battery', 'charge', 'battery level', 'how much battery'])) {
+    else if (_matchesAny(
+        command, ['battery', 'charge', 'battery level', 'how much battery'])) {
       await tellBattery();
     }
     // ── DATE ─────────────────────────────────────────────────────────────
     else if (_matchesAny(command, ['date', 'what day', "today's date"])) {
       await tellDate();
+    }
+    // ── READ TEXT (OCR) ──────────────────────────────────────────────────
+    else if (_matchesAny(command, [
+      'read text',
+      'read this',
+      'read that',
+      'read it',
+      'what does this say',
+      'what does it say',
+      'read the sign',
+      'read the label',
+    ])) {
+      if (onReadTextRequested != null) {
+        _speak('Reading text.');
+        onReadTextRequested!();
+      } else {
+        _speak('Text reading is not available right now.');
+      }
     }
     // ── DESCRIBE SCENE ───────────────────────────────────────────────────
     else if (_matchesAny(command, [
@@ -692,26 +799,188 @@ class VoiceService {
       final afterMany = _extractAfter(command, 'how many');
       if (afterMany != null) await countObjects(afterMany);
     }
+    // ── OPEN CAMERA (home screen) ────────────────────────────────────────
+    else if (_matchesAny(
+        command, ['open camera', 'open the camera', 'go to camera', 'launch camera'])) {
+      if (onOpenCameraRequested != null) {
+        onOpenCameraRequested!();
+      } else {
+        _speak('Camera is not available from this screen.');
+      }
+    }
+    // ── TAKE / ANALYSE PHOTO (camera screen) ────────────────────────────
+    // Broad match instead of an exhaustive phrase list: "take" + a
+    // photo/picture word, or "analyse/analyze" + this/photo/picture.
+    else if ((command.contains('take') &&
+            (command.contains('photo') ||
+                command.contains('picture') ||
+                command.contains('pic'))) ||
+        ((command.contains('analyse') || command.contains('analyze')) &&
+            (command.contains('photo') ||
+                command.contains('picture') ||
+                command.contains('this')))) {
+      if (onTakePhotoRequested != null) {
+        onTakePhotoRequested!();
+      } else {
+        _speak('Taking a photo is not available from this screen.');
+      }
+    }
+    // ── TOGGLE FACE RECOGNITION (camera screen) ─────────────────────────
+    else if (command.contains('face recognition') &&
+        _matchesAny(command, ['on', 'off', 'toggle', 'enable', 'disable'])) {
+      if (onToggleFaceRecognitionRequested != null) {
+        onToggleFaceRecognitionRequested!();
+      } else {
+        _speak('Face recognition is not available from this screen.');
+      }
+    }
+    // ── REGISTER A FACE — open the registration screen ──────────────────
+    else if (_matchesAny(command,
+        ['register a face', 'register face', 'add a face', 'new face'])) {
+      if (onOpenFaceRegistrationRequested != null) {
+        onOpenFaceRegistrationRequested!();
+      } else {
+        _speak('Face registration is not available from this screen.');
+      }
+    }
+    // ── START CAPTURE (face registration screen) ─────────────────────────
+    else if (_matchesAny(command, [
+      'start capture',
+      'start capturing',
+      'begin capture',
+      'begin capturing',
+      'start registration',
+      'capture photos',
+    ])) {
+      if (onStartCaptureRequested != null) {
+        onStartCaptureRequested!();
+      } else {
+        _speak('Nothing to capture right now.');
+      }
+    }
+    // ── RETAKE (face registration screen) ────────────────────────────────
+    else if (_matchesAny(command, ['retake', 'try again', 'redo photos'])) {
+      if (onRetakeRequested != null) {
+        onRetakeRequested!();
+      } else {
+        _speak('Nothing to retake right now.');
+      }
+    }
+    // ── CONFIRM REGISTRATION (face registration screen) ──────────────────
+    else if (_matchesAny(command,
+        ['confirm registration', 'save face', 'confirm', 'submit'])) {
+      if (onConfirmRegistrationRequested != null) {
+        onConfirmRegistrationRequested!();
+      } else {
+        _speak('Nothing to confirm right now.');
+      }
+    }
+    // ── DELETE A REGISTERED FACE (face registration screen) ──────────────
+    else if (command.startsWith('delete ') || command.startsWith('remove ')) {
+      final name = command
+          .replaceFirst(RegExp(r'^(delete|remove)\s+'), '')
+          .trim();
+      if (name.isNotEmpty && onDeleteFaceRequested != null) {
+        onDeleteFaceRequested!(name);
+      } else {
+        _speak('I could not tell who to delete.');
+      }
+    }
+    // ── PROVIDE A NAME (face registration screen) ─────────────────────────
+    else if (_matchesAny(command, ['my name is', 'name is', 'call them'])) {
+      final name = command
+          .replaceFirst(RegExp(r'^(my name is|name is|call them)\s+'), '')
+          .trim();
+      if (name.isNotEmpty && onNameProvided != null) {
+        onNameProvided!(name);
+      } else {
+        _speak('I did not catch the name.');
+      }
+    }
+    // ── READ AGAIN (text reading / photo analysis screens) ────────────────
+    else if (_matchesAny(command, ['read again', 'say the text again'])) {
+      if (onReadAgainRequested != null) {
+        onReadAgainRequested!();
+      } else if (_lastResponse != null) {
+        _speak(_lastResponse!);
+      } else {
+        _speak('Nothing to read again.');
+      }
+    }
+    // ── GO BACK ────────────────────────────────────────────────────────────
+    else if (_matchesAny(command, ['go back', 'go back to camera', 'back to camera'])) {
+      if (onGoBackRequested != null) {
+        onGoBackRequested!();
+      } else {
+        _speak('Cannot go back from this screen.');
+      }
+    }
     // ── OPEN / LAUNCH APP ────────────────────────────────────────────────
     else if (command.startsWith('open ') || command.startsWith('launch ')) {
       final appName = command.replaceFirst(RegExp(r'^(open|launch)\s+'), '');
       if (appName.isNotEmpty) await launchApp(appName);
     }
     // ── NAVIGATE / GO TO ─────────────────────────────────────────────────
-    else if (_matchesAny(command, ['navigate to', 'directions to', 'take me to', 'go to'])) {
+    else if (_matchesAny(
+        command, ['navigate to', 'directions to', 'take me to', 'go to'])) {
       final dest = command
-          .replaceFirst(RegExp(r'^(navigate to|directions to|take me to|go to)\s*'), '')
+          .replaceFirst(
+              RegExp(r'^(navigate to|directions to|take me to|go to)\s*'), '')
           .trim();
       await navigateTo(dest.isNotEmpty ? dest : 'your destination');
     }
     // ── SCAN STORAGE ─────────────────────────────────────────────────────
-    else if (_matchesAny(command, ['scan storage', 'find apk', 'search storage'])) {
+    else if (_matchesAny(
+        command, ['scan storage', 'find apk', 'search storage'])) {
       await scanStorageForApks();
     }
-    // ── UNRECOGNIZED ─────────────────────────────────────────────────────
+    // ── UNRECOGNIZED — try Mistral before giving up ──────────────────────
     else {
-      onUnrecognized(command);
+      await _handleUnmatchedCommand(command, onUnrecognized, isRetry: isRetry);
     }
+  }
+
+  /// Called when the local keyword matching in [_parseVoiceCommand] found
+  /// nothing. Tries Mistral (if configured) in two steps:
+  ///   1. Ask it to map the transcript onto one of Envision's own known
+  ///      commands (fixes misheard/unusual phrasings like "take a picture"
+  ///      without hardcoding every variant).
+  ///   2. If that also comes back empty, treat it as an open-ended
+  ///      question and answer it conversationally — this doubles as the
+  ///      "ask Envision anything" chatbot.
+  /// Falls back to the plain "didn't understand" message if Mistral isn't
+  /// configured, errors out, or [isRetry] is true (prevents infinite
+  /// recursion if a classified command somehow doesn't match on replay).
+  Future<void> _handleUnmatchedCommand(
+    String command,
+    Function(String) onUnrecognized, {
+    required bool isRetry,
+  }) async {
+    if (command.isEmpty) {
+      _speak(
+          "Sorry, I didn't hear anything. Try saying 'help' for a list of commands.");
+      onUnrecognized(command);
+      return;
+    }
+
+    if (!isRetry && MistralService.instance.isConfigured) {
+      final matched = await MistralService.instance.classifyCommand(command);
+      if (matched != null) {
+        await _parseVoiceCommand(matched, onUnrecognized, isRetry: true);
+        return;
+      }
+
+      // No known command matched — treat it as an open-ended question.
+      final reply = await MistralService.instance.chat(command);
+      _speak(reply);
+      _lastResponse = reply;
+      onUnrecognized(command);
+      return;
+    }
+
+    _speak(
+        "Sorry, I didn't understand \"$command\". Try saying 'help' for a list of commands.");
+    onUnrecognized(command);
   }
 
   /// Returns true if [text] contains any of the [phrases].
@@ -801,7 +1070,9 @@ class VoiceService {
   }
 
   Future<void> countObjects(String objectName) async {
-    final cleaned = objectName.replaceAll(RegExp(r'\s+(are|is|there|do you see).*'), '').trim();
+    final cleaned = objectName
+        .replaceAll(RegExp(r'\s+(are|is|there|do you see).*'), '')
+        .trim();
     final count = _currentDetections
         .where((det) => det.label.toLowerCase().contains(cleaned.toLowerCase()))
         .length;
@@ -848,7 +1119,8 @@ class VoiceService {
       final battery = Battery();
       final level = await battery.batteryLevel;
       final state = await battery.batteryState;
-      final charging = state == BatteryState.charging ? ', and it is charging' : '';
+      final charging =
+          state == BatteryState.charging ? ', and it is charging' : '';
       final response = 'Battery is at $level percent$charging.';
       _speak(response);
       _lastResponse = response;
@@ -859,11 +1131,15 @@ class VoiceService {
   }
 
   Future<void> _tellHelp() async {
-    const response =
-        'You can say: describe, open followed by an app name, '
+    const response = 'You can say: describe, read text, take a photo, '
+        'turn face recognition on or off, register a face, open camera, '
+        'start capture, retake, confirm, delete followed by a name, '
+        'my name is followed by a name, read again, go back, '
+        'open followed by an app name, '
         'what time is it, battery, today\'s date, '
         'how many people, navigate to a place, '
-        'repeat, stop, or help.';
+        'repeat, stop, or help. '
+        'You can also just ask me a question if it is not one of these.';
     _speak(response);
     _lastResponse = response;
   }
@@ -980,8 +1256,10 @@ class VoiceService {
                   'path': e['path'] ?? ''
                 })
             .toList();
-        final top =
-            _cachedApks.take(3).map((e) => e['label'] ?? e['package']).join(', ');
+        final top = _cachedApks
+            .take(3)
+            .map((e) => e['label'] ?? e['package'])
+            .join(', ');
         _speak('Found APKs: $top.');
       } else {
         _speak('Storage scan not permitted.');
@@ -1001,8 +1279,8 @@ class VoiceService {
   /// Remove stale cooldown entries. Called every 10 s from the screen.
   void cleanupCooldowns() {
     final now = DateTime.now();
-    _lastAnnounced.removeWhere(
-        (key, time) => now.difference(time).inSeconds > 12);
+    _lastAnnounced
+        .removeWhere((key, time) => now.difference(time).inSeconds > 12);
     // Reset global throttle if it's been idle long enough
     if (_lastAnnouncementTime != null &&
         now.difference(_lastAnnouncementTime!) > const Duration(seconds: 12)) {

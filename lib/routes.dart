@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:tensorflow_demo/screens/live_object_detection/live_object_detection_screen.dart';
 import 'package:tensorflow_demo/screens/photo_analyzed/photo_analyze_screen.dart';
+import 'package:tensorflow_demo/screens/text_reading/text_reading_screen.dart';
 import 'package:tensorflow_demo/values/app_routes.dart';
 
 class Routes {
@@ -34,6 +35,13 @@ class Routes {
           return getRoute(widget: const LiveObjectDetectionScreen());
         }
         return getRoute(widget: PhotoAnalyzedScreen(imageBytes: imageBytes));
+
+      case AppRoutes.textReadingScreen:
+        final imageBytes = settings.arguments as Uint8List?;
+        if (imageBytes == null || imageBytes.isEmpty) {
+          return getRoute(widget: const LiveObjectDetectionScreen());
+        }
+        return getRoute(widget: TextReadingScreen(imageBytes: imageBytes));
 
       default:
         return getRoute(widget: const LiveObjectDetectionScreen());
