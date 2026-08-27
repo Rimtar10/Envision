@@ -1,43 +1,81 @@
-# Miscellaneous
-
-*.class
-*.log
-*.pyc
-*.swp
-.DS_Store
-.atom/
-.buildlog/
-.history
-.svn/
-.vscode/
-migrate_working_dir/
-
-# IntelliJ related
-*.iml
-*.ipr
-*.iws
-.idea/
-
-
-# Flutter/Dart/Pub related
-**/doc/api/
-**/ios/Flutter/.last_build_id
+# ── Flutter / Dart ────────────────────────────────────────────────────────────
 .dart_tool/
 .flutter-plugins
 .flutter-plugins-dependencies
 .pub-cache/
 .pub/
 /build/
-pubspec.lock
-**/*.g.dart
-
-# Symbolication related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+**.g.dart
 app.*.symbols
-
-# Obfuscation related
 app.*.map.json
 
-# Android Studio will place build artifacts here
+# NOTE: pubspec.lock IS committed. This is an application, not a library —
+# the lockfile is what makes the build reproducible.
+
+# ── Android build output ──────────────────────────────────────────────────────
 /android/app/debug
 /android/app/profile
 /android/app/release
+android/build/
+android/.gradle/
+android/app/build/
+.gradle/
+
+# ── Python / ML environment ───────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# ── ML training artefacts ─────────────────────────────────────────────────────
+# Training runs are large (57-76 MB per checkpoint) and reproducible from the
+# scripts in metrics/. Keep results.csv + the summary CSVs by exception below.
+runs/
+datasets/
+*_saved_model/
+*.pt
+*.onnx
+*.npy
+
+# Model weights shipped with the app: track via Git LFS or a GitHub Release,
+# not as raw blobs. Uncomment the LFS lines in .gitattributes if you enable it.
+assets/*.tflite
+
+# Keep the small, human-readable evaluation outputs — these ARE the results.
+!metrics/output/**/*.csv
+!metrics/output/**/*.txt
+!metrics/runtime_output/*.csv
+!metrics/runtime_output/*.txt
+
+# ── Datasets (regenerate with metrics/build_unified_model.py) ─────────────────
+unified_dataset/
+accessibility_dataset/
+Doors-Dataset-Updated-1/
+Stairs_Detection-3/
+
+# ── JVM / Gradle crash dumps ──────────────────────────────────────────────────
+hs_err_pid*.log
+replay_pid*.log
+*.log
+
+# ── Editor / OS ───────────────────────────────────────────────────────────────
+.idea/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+.history
+.svn/
+.atom/
+.buildlog/
+migrate_working_dir/
+*.class
+*.swp
+
+# ── Scratch ───────────────────────────────────────────────────────────────────
+_to_delete/
+
+# Local secrets — never commit
+metrics/roboflow_key.txt

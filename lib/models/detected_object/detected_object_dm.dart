@@ -1,13 +1,14 @@
 import 'package:flutter/cupertino.dart';
 import 'package:tensorflow_demo/models/screen_params.dart';
-import 'package:tensorflow_demo/values/app_constants.dart';
 
-/// Represents the recognition output from the model
+/// Represents the recognition output from the model.
 class DetectedObjectDm {
   const DetectedObjectDm({
     required this.label,
     required this.score,
     required this.location,
+    this.yStretch = 1.0,
+    this.modelSize = 640.0,
   });
 
   /// Label of the result
@@ -16,23 +17,27 @@ class DetectedObjectDm {
   /// Confidence [0.0, 1.0]
   final num score;
 
-  /// Location of bounding box rect
-  ///
-  /// The rectangle corresponds to the raw input image
-  /// passed for inference
+  /// Bounding box in MODEL space: 0..[modelSize] on both axes, with the
+  /// letterbox padding already removed (so the content fills the full square).
   final Rect location;
 
-  /// Returns bounding box rectangle corresponding to the
-  /// displayed image on screen
+  /// Vertical stretch factor introduced by removing the letterbox padding.
   ///
-  /// This is the actual location where rectangle is rendered on
-  /// the screen
+  /// When padding lands on the y axis, undoing it multiplies every box height
+  /// by `modelSize / contentHeight`. Distance estimation must divide it back
+  /// out, otherwise objects are reported as closer than they really are — the
+  /// error is silent, device-dependent, and always in the dangerous direction.
+  final double yStretch;
+
+  /// The square input edge of the model that produced this detection.
+  /// Carried per-detection so a 640 model and a 448 model can coexist.
+  final double modelSize;
+
+  /// Bounding box rectangle in screen coordinates, for rendering.
   Rect get renderLocation {
     final previewSize = ScreenParams.screenPreviewSize;
-    final double scaleX =
-        previewSize.width / AppConstants.ssdCompatibleImageWidth;
-    final double scaleY =
-        previewSize.height / AppConstants.ssdCompatibleImageHeight;
+    final double scaleX = previewSize.width / modelSize;
+    final double scaleY = previewSize.height / modelSize;
     return Rect.fromLTWH(
       location.left * scaleX,
       location.top * scaleY,
@@ -42,7 +47,6 @@ class DetectedObjectDm {
   }
 
   @override
-  String toString() {
-    return 'DetectedObjectDm(label: $label, score: $score, location: $location)';
-  }
+  String toString() =>
+      'DetectedObjectDm(label: $label, score: $score, location: $location)';
 }

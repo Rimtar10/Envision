@@ -1,0 +1,5 @@
+# Placeholder. This file held synthetic test data and was blanked.
+# Capture a REAL session like this, then run runtime_report.py on it:
+#   flutter run | tee perf_log.txt          (macOS/Linux)
+#   flutter run | Tee-Object perf_log.txt   (Windows PowerShell)
+# Each processed frame appends a line:  PERF_CSV,timestamp_ms,inference_ms,fps,detections

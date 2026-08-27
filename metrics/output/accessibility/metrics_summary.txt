@@ -1,0 +1,12 @@
+ENVISION — ACCESSIBILITY MODEL ACCURACY
+================================================
+
+Overall precision : 0.723
+Overall recall    : 0.656
+mAP@50            : 0.712
+mAP@50-95         : 0.492
+
+Per-class mAP@50-95 (classes with validation instances):
+  Stair         : 0.628 (220 instances)
+  Door          : 0.533 (639 instances)
+  Window        : 0.316 (1583 instances)

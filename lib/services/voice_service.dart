@@ -1,6 +1,8 @@
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'dart:async';
+import 'dart:math';
+import 'dart:ui';
 import 'package:flutter/services.dart';
 import 'package:tensorflow_demo/models/detected_object/detected_object_dm.dart';
 import 'package:battery_plus/battery_plus.dart';
@@ -132,17 +134,13 @@ class VoiceService {
   /// Classes that are dangerous to a visually impaired pedestrian.
   /// These get lower confidence thresholds AND are always sorted to the front
   /// of the announcement queue.
+  // Keys are lowercase; callers must lower-case the label before checking,
+  // because the accessibility model emits capitalized labels (e.g. "Stair").
+  // Stairs are included here: for a blind pedestrian an unexpected staircase —
+  // especially a descending one — is one of the most dangerous obstacles.
   static const Set<String> _hazardClasses = {
-    'person',
-    'car',
-    'truck',
-    'bus',
-    'motorcycle',
-    'bicycle',
-    'dog',
-    'fire hydrant',
-    'stop sign',
-    'traffic light',
+    'person', 'car', 'truck', 'bus', 'motorcycle', 'bicycle',
+    'dog', 'fire hydrant', 'stop sign', 'traffic light', 'stair',
   };
 
   // ── Object real-world heights (metres) ──────────────────────────────────
@@ -180,8 +178,17 @@ class VoiceService {
     'book': 0.2,
     'clock': 0.3,
     'refrigerator': 1.7,
+    // ── Accessibility model classes (keys MUST be lowercase) ──────────────
+    // The accessibility model emits capitalized labels (Door, Stair, Window,
+    // Gate); _estimateDistance lower-cases the label before lookup, so these
+    // keys are lowercase. Heights are the approximate visible vertical extent
+    // of the object as it typically appears in-frame (used by the pinhole
+    // distance estimate), NOT a single step's riser height.
     'door': 2.0,
-    'stairs': 0.2, // riser height
+    'stair': 1.0,    // visible height of a flight as it fills the frame
+    'stairs': 1.0,
+    'window': 1.2,
+    'gate': 1.8,
     'curb': 0.15,
     'keyboard': 0.05,
     'mouse': 0.04,
@@ -252,9 +259,32 @@ class VoiceService {
 
   /// Called every camera frame with current detections.
   Future<void> announceDetections(List<DetectedObjectDm> detections) async {
-    if (_stt.isListening || _inConversation) return;
-
+    // Keep the scene snapshot fresh ALWAYS — describeScene() and countObjects()
+    // read this, and they used to see stale data because the old early-return
+    // sat above this line and fired on most frames.
     _currentDetections = detections;
+
+    // ── Microphone arbitration ────────────────────────────────────────────
+    // The wake-word poller holds the mic ~83% of the time (4 s listen, 800 ms
+    // gap). Gating EVERY announcement on `_stt.isListening` therefore silenced
+    // the app's primary safety function on roughly 5 of every 6 frames.
+    //
+    // New rule:
+    //   - a user-initiated command session always wins (they asked a question)
+    //   - ordinary objects still yield to the mic
+    //   - a HAZARD does not yield: we take the mic back and speak
+    final hasHazard = detections
+        .any((d) => _hazardClasses.contains(d.label.toLowerCase()));
+
+    if (_inConversation || _commandListening) return;
+
+    if (_stt.isListening) {
+      if (!hasHazard) return;
+      // Release the mic before speaking, otherwise the TTS output is fed
+      // straight back into the recogniser. The STT onStatus handler
+      // reschedules the wake-word poll once the mic is free.
+      await _stt.stop();
+    }
 
     // ── Path-clear logic ──────────────────────────────────────────────────
     if (detections.isEmpty) {
@@ -279,7 +309,7 @@ class VoiceService {
     if (scored.isEmpty) return;
 
     final nearest = scored.first;
-    final meters = _estimateDistance(nearest.label, nearest.location);
+    final meters = _estimateDistance(nearest);
     final now = DateTime.now();
 
     // ── Hazard override ───────────────────────────────────────────────────
@@ -323,7 +353,7 @@ class VoiceService {
     _lastAnnouncedDistance = meters;
 
     // ── Build announcement ────────────────────────────────────────────────
-    final position = _getPosition(nearest.location);
+    final position = _getPosition(nearest);
     final phrase = _buildDistancePhrase(nearest.label, meters, position);
 
     String announcement;
@@ -338,9 +368,9 @@ class VoiceService {
       if (scored.length > 1) {
         final second = scored[1];
         if (second.label != nearest.label) {
-          final secMeters = _estimateDistance(second.label, second.location);
+          final secMeters = _estimateDistance(second);
           if (secMeters < 0 || secMeters < 5.0) {
-            final secPos = _getPosition(second.location);
+            final secPos = _getPosition(second);
             announcement +=
                 ' ${_buildDistancePhrase(second.label, secMeters, secPos)}.';
           }
@@ -374,8 +404,8 @@ class VoiceService {
 
     final unique = byLabel.values.toList();
     unique.sort((a, b) {
-      final aH = _hazardClasses.contains(a.label) ? 1 : 0;
-      final bH = _hazardClasses.contains(b.label) ? 1 : 0;
+      final aH = _hazardClasses.contains(a.label.toLowerCase()) ? 1 : 0;
+      final bH = _hazardClasses.contains(b.label.toLowerCase()) ? 1 : 0;
       if (aH != bH) return bH - aH; // hazard first
       // Same tier → closer (larger area) first
       final aArea = a.location.width * a.location.height;
@@ -393,7 +423,7 @@ class VoiceService {
       'Envision is ready. '
       'Objects around you will be announced automatically. '
       'Tap anywhere to give a voice command, '
-      'or say Envision to speak to me.',
+      'or double tap to describe the scene.',
     );
   }
 
@@ -411,24 +441,36 @@ class VoiceService {
     });
   }
 
-  /// Pinhole-camera distance estimate.
-  /// bounding box coords are in model space (0–640).
-  /// Focal length ~554 px derived from 60° vertical FOV:
-  ///   f = 640 / (2 * tan(30°)) ≈ 554
-  double _estimateDistance(String label, Rect boundingBox) {
-    final h = _objectHeights[label];
+  /// Pinhole-camera distance estimate, in metres. Returns -1 when the class
+  /// has no reference height.
+  ///
+  /// Focal length is derived from the model input edge for an assumed ~60°
+  /// vertical field of view:  f = size / (2 * tan(30°))  (≈554 px at 640).
+  /// It scales automatically if the model is re-exported at another imgsz.
+  ///
+  /// The box height is divided by [DetectedObjectDm.yStretch] first. Undoing
+  /// the letterbox padding stretches boxes on whichever axis was padded; when
+  /// that is the y axis, an unstretched height makes every object read as
+  /// closer than it is. That error is silent and always in the dangerous
+  /// direction, so it is corrected here rather than left to luck of geometry.
+  ///
+  /// ACCURACY NOTE: this is a heuristic, not a measurement. It assumes a fixed
+  /// real-world height per class (see [_objectHeights]) and a nominal FOV, so
+  /// expect roughly +/-30%. Spoken output is deliberately rounded to match.
+  double _estimateDistance(DetectedObjectDm det) {
+    final h = _objectHeights[det.label.toLowerCase()];
     if (h == null) return -1;
-    const double focalLength = 554.0;
-    final double pixelHeight = boundingBox.height;
+    final focalLength = det.modelSize / (2 * tan(pi / 6));
+    final pixelHeight = det.location.height / det.yStretch;
     if (pixelHeight <= 0) return -1;
     return (h * focalLength) / pixelHeight;
   }
 
-  /// Which horizontal third of the 640 px frame is the object centre in?
-  String _getPosition(Rect box) {
-    final cx = box.left + box.width / 2;
-    if (cx < 640 / 3.0) return 'to your left';
-    if (cx > 640 * 2.0 / 3.0) return 'to your right';
+  /// Which horizontal third of the frame is the object centre in?
+  String _getPosition(DetectedObjectDm det) {
+    final cx = det.location.left + det.location.width / 2;
+    if (cx < det.modelSize / 3.0) return 'to your left';
+    if (cx > det.modelSize * 2.0 / 3.0) return 'to your right';
     return 'ahead';
   }
 
@@ -461,11 +503,26 @@ class VoiceService {
         label.isNotEmpty ? label[0].toUpperCase() + label.substring(1) : label;
     if (meters < 0) return '$cap, $position';
     if (meters < 0.8) return '$cap right in front of you';
-    if (meters < 10.0) {
-      final mStr = meters.toStringAsFixed(1);
-      return '$cap, $mStr meters, $position';
-    }
+    if (meters < 10.0) return '$cap, ${_spokenDistance(meters)}, $position';
     return '$cap far ahead';
+  }
+
+  /// Renders a distance the way a person would say it.
+  ///
+  /// The pinhole estimate is roughly +/-30% accurate, so "1.7 meters" claims a
+  /// precision the app does not have and sounds robotic read aloud. Rounding to
+  /// the half-metre below 3 m and the whole metre above is both more honest and
+  /// faster to hear.
+  String _spokenDistance(double meters) {
+    if (meters < 3.0) {
+      final half = (meters * 2).round() / 2.0;
+      if (half <= 0.5) return 'half a meter';
+      if (half == 1.0) return 'one meter';
+      return half == half.roundToDouble()
+          ? '${half.toInt()} meters'
+          : '${half.toStringAsFixed(1)} meters';
+    }
+    return 'about ${meters.round()} meters';
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -961,31 +1018,55 @@ class VoiceService {
     final scored = _scoreDetections(_currentDetections);
 
     final items = scored.take(5).map((det) {
-      final dist = _estimateDistance(det.label, det.location);
-      final pos = _getPosition(det.location);
+      final dist = _estimateDistance(det);
+      final pos = _getPosition(det);
       final count = labelCounts[det.label] ?? 1;
 
       // Group label — "3 people" vs "A person"
       final String labelStr;
       if (count > 1) {
-        // Simple pluralisation
-        final plural = det.label.endsWith('s') ? det.label : '${det.label}s';
-        labelStr = '$count $plural';
+        labelStr = '$count ${_pluralise(det.label)}';
       } else {
         labelStr = det.label[0].toUpperCase() + det.label.substring(1);
       }
 
       if (dist < 0) return '$labelStr, $pos';
       if (dist < 0.8) return '$labelStr right in front of you';
-      if (dist < 10.0) {
-        return '$labelStr, ${dist.toStringAsFixed(1)} meters, $pos';
-      }
+      if (dist < 10.0) return '$labelStr, ${_spokenDistance(dist)}, $pos';
       return '$labelStr, far ahead';
     }).join('; ');
 
     final response = 'I can see: $items.';
     _speak(response);
     _lastResponse = response;
+  }
+
+  /// English pluralisation for the handful of labels where naive +'s' is wrong.
+  /// Without this the app says "3 persons", "3 bus" and "3 sheeps".
+  static const Map<String, String> _irregularPlurals = {
+    'person': 'people',
+    'bus': 'buses',
+    'sheep': 'sheep',
+    'skis': 'skis',
+    'scissors': 'scissors',
+    'mouse': 'mice',
+    'knife': 'knives',
+    'sandwich': 'sandwiches',
+    'couch': 'couches',
+    'bench': 'benches',
+    'stair': 'stairs',
+    'glass': 'glasses',
+  };
+
+  static String _pluralise(String label) {
+    final lower = label.toLowerCase();
+    final irregular = _irregularPlurals[lower];
+    if (irregular != null) return irregular;
+    if (lower.endsWith('s') || lower.endsWith('x') || lower.endsWith('ch') ||
+        lower.endsWith('sh')) {
+      return '${label}es';
+    }
+    return '${label}s';
   }
 
   Future<void> countObjects(String objectName) async {
@@ -1002,7 +1083,7 @@ class VoiceService {
     } else if (count == 1) {
       response = 'One $cleaned detected.';
     } else {
-      response = '$count ${cleaned}s detected.';
+      response = '$count ${_pluralise(cleaned)} detected.';
     }
     _speak(response);
     _lastResponse = response;

@@ -1,0 +1,9 @@
+class,val_instances,mAP50_95
+Door,639,0.5329
+Stair,220,0.6283
+Window,1583,0.3160
+
+overall_precision,0.7235
+overall_recall,0.6559
+overall_mAP50,0.7117
+overall_mAP50_95,0.4924

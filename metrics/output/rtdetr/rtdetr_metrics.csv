@@ -1,0 +1,2 @@
+model,params_M,mAP50,mAP50_95,precision,recall,infer_ms
+RT-DETR-L (transformer),32.0,0.366,0.243,0.712,0.371,25.7

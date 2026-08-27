@@ -1,0 +1,4 @@
+model,params_M,mAP50,mAP50_95,precision,recall,infer_ms
+YOLOv8n (CNN),3.15,0.607,0.448,0.639,0.536,fast
+YOLO11n (CNN),2.62,0.671,0.505,0.663,0.589,fastest
+RT-DETR-L (transformer),32.0,0.366,0.243,0.712,0.371,25.7
