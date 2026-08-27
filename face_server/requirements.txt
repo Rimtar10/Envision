@@ -1,0 +1,9 @@
+flask
+deepface
+opencv-python
+numpy
+scikit-learn
+
+# OCR (Text Reading module)
+paddleocr>=2.7
+paddlepaddle
