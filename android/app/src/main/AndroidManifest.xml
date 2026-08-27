@@ -20,7 +20,14 @@
     <application
         android:label="Envision"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
+        <!-- usesCleartextTraffic: ApiService talks to the face-recognition and
+             PaddleOCR server over plain http:// on the LAN. Android has blocked
+             cleartext HTTP by default since API 28, so without this every
+             server call fails silently and the app drops to its offline
+             fallbacks. Replace with a res/xml/network_security_config.xml
+             scoped to the server host before any public release. -->
 
         <activity
             android:name=".MainActivity"

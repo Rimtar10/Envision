@@ -79,3 +79,6 @@ _to_delete/
 
 # Local secrets — never commit
 metrics/roboflow_key.txt
+
+# Local run configs — these carry --dart-define API keys.
+.vscode/

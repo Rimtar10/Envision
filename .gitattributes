@@ -1,0 +1,20 @@
+# Normalise line endings so a checkout on Windows never shows the whole
+# repo as modified. Without this, a merge or clone rewrites every file's
+# line endings and `git status` reports hundreds of phantom changes.
+* text=auto
+
+# Binaries git must never touch.
+*.tflite binary
+*.pt      binary
+*.onnx    binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.ttf     binary
+*.otf     binary
+*.zip     binary
+
+# Windows-only scripts keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
