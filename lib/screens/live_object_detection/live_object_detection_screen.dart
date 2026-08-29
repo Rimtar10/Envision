@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:developer';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/svg.dart';
@@ -45,16 +46,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
   // ── Face recognition state ──────────────────────────────────────────────
   List<FaceResult> _faceResults = [];
   bool _faceRecognitionEnabled = true;
-
-  /// Whether an unrecognised face is announced as "Person".
-  ///
-  /// The object detector already announces people with distance and direction
-  /// ("Person, 2 metres, ahead"), so this adds a second, less informative
-  /// utterance about the same human. Set to false to let the detector own
-  /// strangers entirely and reserve this voice for names -- which keeps the
-  /// audio channel clearer, and a blind user's hearing is their primary safety
-  /// sensor.
-  static const bool _announceUnknownFaces = true;
   Timer? _faceFrameThrottle;
 
   Timer? _cleanupTimer;
@@ -176,7 +167,13 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                     // A 112x112 thumbnail of the exact crop being embedded.
                     // If this shows a face, recognition is a threshold
                     // question; if it shows a wall or a smear, it is not.
-                    if (_faceRecognitionEnabled &&
+                    // Debug aid: the exact crop being fed to MobileFaceNet.
+                    // Gated on !kReleaseMode rather than removed -- it is the
+                    // single most useful thing to look at when recognition
+                    // misbehaves, and it costs a JPEG encode per frame, so it
+                    // has no business in a shipped build.
+                    if (!kReleaseMode &&
+                        _faceRecognitionEnabled &&
                         FaceRecognitionService.instance.debugLastCrop != null)
                       Positioned(
                         top: 10,
@@ -482,7 +479,12 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
       }
       await _cameraController?.dispose();
       _cameraController = null;
-    } catch (_) {}
+    } catch (e) {
+      // Was an empty catch. Swallowing an error here is how this app
+      // goes quiet without anyone noticing -- and quiet reads as
+      // "path is clear". Logged, not handled: behaviour is unchanged.
+      debugPrint('[camera screen] ignored: $e');
+    }
 
     if (mounted) setState(() => _faceResults = []);
     if (!mounted) return;
@@ -521,17 +523,12 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
     for (final face in results) {
       if (face.isKnown && face.name != null) {
-        // Recognised: lead with the name. That is the only thing this layer
-        // knows that the object detector does not.
         if (FaceRecognitionService.instance.shouldAnnounce(face.name!)) {
-          VoiceService.instance.speak('${face.name}.');
+          VoiceService.instance.speak('${face.name} is here.');
         }
-      } else if (_announceUnknownFaces) {
-        // Not recognised: say "Person", never "Unknown person". Calling someone
-        // unknown is information about the app's database, not about the world,
-        // and it is not what a person walking past would want said about them.
+      } else {
         if (FaceRecognitionService.instance.shouldAnnounce('unknown')) {
-          VoiceService.instance.speak('Person.');
+          VoiceService.instance.speak('Unknown person.');
         }
       }
     }
@@ -595,7 +592,12 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
       if (_cameraController?.value.isStreamingImages == true) {
         _cameraController?.stopImageStream();
       }
-    } catch (_) {}
+    } catch (e) {
+      // Was an empty catch. Swallowing an error here is how this app
+      // goes quiet without anyone noticing -- and quiet reads as
+      // "path is clear". Logged, not handled: behaviour is unchanged.
+      debugPrint('[camera screen] ignored: $e');
+    }
     _objectDetectorStream?.cancel();
     _objectDetectorStream = null;
     _detector?.stop();
@@ -608,7 +610,12 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     _appLifecycleListener.dispose();
     try {
       _cameraController?.stopImageStream();
-    } catch (_) {}
+    } catch (e) {
+      // Was an empty catch. Swallowing an error here is how this app
+      // goes quiet without anyone noticing -- and quiet reads as
+      // "path is clear". Logged, not handled: behaviour is unchanged.
+      debugPrint('[camera screen] ignored: $e');
+    }
     _cameraController?.dispose();
     _cameraController = null;
     _objectDetectorStream?.cancel();
@@ -728,7 +735,12 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     if (existingController != null) {
       try {
         await existingController.dispose();
-      } catch (_) {}
+      } catch (e) {
+        // Was an empty catch. Swallowing an error here is how this app
+        // goes quiet without anyone noticing -- and quiet reads as
+        // "path is clear". Logged, not handled: behaviour is unchanged.
+        debugPrint('[camera screen] ignored: $e');
+      }
     }
 
     try {
@@ -784,7 +796,12 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     VoiceService.instance.speak('Taking photo.');
     try {
       await _cameraController?.stopImageStream();
-    } catch (_) {}
+    } catch (e) {
+      // Was an empty catch. Swallowing an error here is how this app
+      // goes quiet without anyone noticing -- and quiet reads as
+      // "path is clear". Logged, not handled: behaviour is unchanged.
+      debugPrint('[camera screen] ignored: $e');
+    }
     final captured = await _cameraController?.takePicture();
     final bytes = await captured?.readAsBytes();
     if (bytes != null && bytes.isNotEmpty) {
@@ -798,7 +815,12 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     VoiceService.instance.speak('Taking photo.');
     try {
       await _cameraController?.stopImageStream();
-    } catch (_) {}
+    } catch (e) {
+      // Was an empty catch. Swallowing an error here is how this app
+      // goes quiet without anyone noticing -- and quiet reads as
+      // "path is clear". Logged, not handled: behaviour is unchanged.
+      debugPrint('[camera screen] ignored: $e');
+    }
     final captured = await _cameraController?.takePicture();
     final bytes = await captured?.readAsBytes();
     if (bytes != null && bytes.isNotEmpty) {

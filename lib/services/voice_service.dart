@@ -3,6 +3,7 @@ import 'package:speech_to_text/speech_to_text.dart';
 import 'dart:async';
 import 'dart:math';
 import 'dart:ui';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:tensorflow_demo/models/detected_object/detected_object_dm.dart';
 import 'package:battery_plus/battery_plus.dart';
@@ -228,7 +229,7 @@ class VoiceService {
 
     final sttAvailable = await _stt.initialize(
       onError: (error) {
-        print('STT Error: $error');
+        _log('STT Error: $error');
         if (_wakeWordEnabled && !_inConversation) {
           // Reschedule wake-word loop after an STT error
           _scheduleWakeWordPoll();
@@ -236,7 +237,7 @@ class VoiceService {
         onListeningStateChanged?.call(false);
       },
       onStatus: (status) {
-        print('STT Status: $status');
+        _log('STT Status: $status');
         if (status == 'notListening' || status == 'done') {
           onListeningStateChanged?.call(false);
           if (_wakeWordEnabled && !_inConversation) {
@@ -245,7 +246,7 @@ class VoiceService {
         }
       },
     );
-    print('STT initialized: $sttAvailable');
+    _log('STT initialized: $sttAvailable');
   }
 
   void _onTtsDone() {
@@ -542,7 +543,7 @@ class VoiceService {
     final message = _pendingMessage!;
     _pendingMessage = null;
     _isSpeaking = true;
-    print('Speaking: $message');
+    _log('Speaking: $message');
     await _tts.speak(message);
   }
 
@@ -568,10 +569,10 @@ class VoiceService {
     _wakeWordTimer?.cancel();
     _wakeWordTimer = null;
     if (enable) {
-      print('[WakeWord] Wake-word detection enabled');
+      _log('[WakeWord] Wake-word detection enabled');
       _scheduleWakeWordPoll();
     } else {
-      print('[WakeWord] Wake-word detection disabled');
+      _log('[WakeWord] Wake-word detection disabled');
       if (_stt.isListening) await _stt.stop();
     }
   }
@@ -632,7 +633,7 @@ class VoiceService {
         cancelOnError: true,
       );
     } catch (e) {
-      print('[WakeWord] STT error during poll: $e');
+      _log('[WakeWord] STT error during poll: $e');
     }
 
     final elapsed = DateTime.now().difference(startedAt);
@@ -651,7 +652,7 @@ class VoiceService {
   }
 
   void _handleWakeWordDetected() {
-    print('[WakeWord] Detected!');
+    _log('[WakeWord] Detected!');
     onWakeWordDetected?.call();
     _inConversation = true;
     _speak('Yes, how can I help?');
@@ -683,7 +684,7 @@ class VoiceService {
   /// Start a full command-listening session (stops TTS + any wake-word poll).
   Future<void> startListening(Function(String) onUnrecognized) async {
     if (!_stt.isAvailable) {
-      print('Speech recognition not available');
+      _log('Speech recognition not available');
       return;
     }
 
@@ -700,7 +701,7 @@ class VoiceService {
       onResult: (result) {
         if (result.finalResult) {
           final command = result.recognizedWords.toLowerCase().trim();
-          print('Heard: $command');
+          _log('Heard: $command');
           onCommandHeard?.call('"$command"');
           _commandListening = false;
           _inConversation = false;
@@ -1098,7 +1099,7 @@ class VoiceService {
       _lastResponse = response;
     } catch (e) {
       _speak('Unable to get the current time.');
-      print('Error getting time: $e');
+      _log('Error getting time: $e');
     }
   }
 
@@ -1126,7 +1127,7 @@ class VoiceService {
       _lastResponse = response;
     } catch (e) {
       _speak('Unable to get battery information.');
-      print('Error getting battery: $e');
+      _log('Error getting battery: $e');
     }
   }
 
@@ -1164,7 +1165,12 @@ class VoiceService {
       );
       if (resp is Map) return resp['opened'] == true;
       if (resp is bool) return resp;
-    } catch (_) {}
+    } catch (e) {
+      // Was an empty catch. Swallowing an error here is how this app
+      // goes quiet without anyone noticing -- and quiet reads as
+      // "path is clear". Logged, not handled: behaviour is unchanged.
+      debugPrint('[voice] ignored: $e');
+    }
     return false;
   }
 
@@ -1227,7 +1233,7 @@ class VoiceService {
       _speak('App launching is only available on Android.');
     } catch (e) {
       _speak('There was an error opening the app.');
-      print('Error launching app: $e');
+      _log('Error launching app: $e');
     }
   }
 
@@ -1268,7 +1274,7 @@ class VoiceService {
       _speak('Storage scanning is only available on Android.');
     } catch (e) {
       _speak('Error scanning storage.');
-      print('scanStorageForApks error: $e');
+      _log('scanStorageForApks error: $e');
     }
   }
 
@@ -1292,4 +1298,14 @@ class VoiceService {
     _wakeWordTimer?.cancel();
     _tts.stop();
   }
+}
+
+/// Voice-layer logging, silenced in release builds.
+///
+/// These lines include every sentence the app speaks. On a user's phone that
+/// is a running transcript of who they met and what was around them, written
+/// to logcat where any app with log access could read it. Fine on a dev
+/// handset, not fine in someone's pocket.
+void _log(Object? message) {
+  if (!kReleaseMode) print(message);
 }
