@@ -158,45 +158,75 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
                             ),
                           ),
 
-                          // ── Face recognition bounding boxes ──────────
-                          ..._faceResults.map(
-                            (face) => Positioned.fromRect(
-                              rect: face.boundingBox,
-                              child: _FaceBox(
-                                name: face.name,
-                                isKnown: face.isKnown,
-                              ),
-                            ),
-                          ),
                         ],
                       ),
                     ),
 
-                    // ── What MobileFaceNet is actually looking at ───────
-                    // A 112x112 thumbnail of the exact crop being embedded.
-                    // If this shows a face, recognition is a threshold
-                    // question; if it shows a wall or a smear, it is not.
+                    // ── Face identity indicator ─────────────────────────
+                    // The bounding box drawn on the live preview drifts off
+                    // the actual face (camera/model coordinate mismatch), so
+                    // identity is shown on the cropped-face thumbnail instead
+                    // — green border + name for a known face, red + "Unknown"
+                    // otherwise. This crop is exactly what MobileFaceNet is
+                    // embedding, so the label is guaranteed to match what's
+                    // pictured, unlike a possibly-misaligned box.
                     if (_faceRecognitionEnabled &&
                         FaceRecognitionService.instance.debugLastCrop != null)
                       Positioned(
                         top: 10,
                         right: 12,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            border: Border.all(color: Colors.white70, width: 2),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(4),
-                            child: Image.memory(
-                              FaceRecognitionService.instance.debugLastCrop!,
-                              width: 84,
-                              height: 84,
-                              gaplessPlayback: true,
-                              fit: BoxFit.cover,
+                        child: Builder(builder: (context) {
+                          final face =
+                              _faceResults.isNotEmpty ? _faceResults.first : null;
+                          final borderColor = face == null
+                              ? Colors.white70
+                              : (face.isKnown ? Colors.green : Colors.red);
+                          final label = face == null
+                              ? null
+                              : (face.isKnown ? (face.name ?? 'Unknown') : 'Unknown');
+                          return Container(
+                            width: 84,
+                            decoration: BoxDecoration(
+                              border: Border.all(color: borderColor, width: 3),
+                              borderRadius: BorderRadius.circular(6),
                             ),
-                          ),
-                        ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                ClipRRect(
+                                  borderRadius: const BorderRadius.only(
+                                    topLeft: Radius.circular(3),
+                                    topRight: Radius.circular(3),
+                                  ),
+                                  child: Image.memory(
+                                    FaceRecognitionService.instance.debugLastCrop!,
+                                    width: 84,
+                                    height: 84,
+                                    gaplessPlayback: true,
+                                    fit: BoxFit.cover,
+                                  ),
+                                ),
+                                if (label != null)
+                                  Container(
+                                    width: double.infinity,
+                                    color: borderColor,
+                                    padding: const EdgeInsets.symmetric(vertical: 2),
+                                    child: Text(
+                                      label,
+                                      textAlign: TextAlign.center,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          );
+                        }),
                       ),
 
                     // ── Server status indicator ─────────────────────────
@@ -519,6 +549,18 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
     if (!mounted) return;
     setState(() => _faceResults = results);
 
+    // Tell VoiceService who's currently in frame so the object-detection
+    // announcement pipeline says the name instead of a generic "Person" for
+    // a recognised face, and keeps saying "Person" for an unrecognised one.
+    FaceResult? knownFace;
+    for (final f in results) {
+      if (f.isKnown && f.name != null) {
+        knownFace = f;
+        break;
+      }
+    }
+    VoiceService.instance.setNearbyPersonName(knownFace?.name);
+
     for (final face in results) {
       if (face.isKnown && face.name != null) {
         // Recognised: lead with the name. That is the only thing this layer
@@ -645,6 +687,10 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
 
       try {
         await VoiceService.instance.ensureInitialized();
+        // One-time read of this device's real camera FOV so distance
+        // estimates aren't based on a generic 60° guess. Cheap and safe to
+        // call every _init(), it just overwrites the same value.
+        await VoiceService.instance.calibrateCameraFov();
       } catch (e) {
         message = 'Voice features unavailable: $e';
         if (mounted) setState(() {});
@@ -826,46 +872,6 @@ class _LiveObjectDetectionScreenState extends State<LiveObjectDetectionScreen> {
       _faceFrameThrottle = null;
       _processFaceFrame(cameraImage);
     });
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// FACE BOX WIDGET
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _FaceBox extends StatelessWidget {
-  const _FaceBox({required this.name, required this.isKnown});
-
-  final String? name;
-  final bool isKnown;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = isKnown ? Colors.green : Colors.red;
-    final label = isKnown ? (name ?? 'Unknown') : 'Unknown';
-
-    return Container(
-      decoration: BoxDecoration(
-        border: Border.all(color: color, width: 2),
-      ),
-      child: Align(
-        alignment: Alignment.topLeft,
-        child: Container(
-          color: color,
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-          child: Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 11,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ),
-      ),
-    );
   }
 }
 
