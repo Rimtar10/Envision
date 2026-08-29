@@ -100,10 +100,8 @@ flutter:
     - assets/accessibility_v2_320_float32.tflite # Door/Stair/Window @ 320
     - assets/accessibility_v2_labels.txt
     - assets/mobilefacenet.tflite                # Face recognition (offline fallback)
-    # assets/model/ (ssd_mobilenet_v1, 4 MB) and assets/label/ were bundled but
-    # never loaded -- verified with a repo-wide grep: the only labels the app
-    # reads are coco_labels.txt and accessibility_v2_labels.txt, both listed
-    # above. The files stay on disk; they are simply no longer shipped.
+    - assets/model/
+    - assets/label/
     - assets/vectors/
 
   #  - images/a_dot_ham.jpeg

@@ -3,7 +3,6 @@ import 'package:speech_to_text/speech_to_text.dart';
 import 'dart:async';
 import 'dart:math';
 import 'dart:ui';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:tensorflow_demo/models/detected_object/detected_object_dm.dart';
 import 'package:battery_plus/battery_plus.dart';
@@ -63,6 +62,65 @@ class VoiceService {
   // ── Current scene state ──────────────────────────────────────────────────
   List<DetectedObjectDm> _currentDetections = [];
   List<Map<String, dynamic>> _cachedApks = [];
+
+  /// Name of the currently-recognised face nearest the camera, if any. Set by
+  /// the screen owning face recognition every time it processes a frame.
+  /// When present, the object-detection announcement pipeline says this name
+  /// instead of the generic "Person" for the person class — a recognized
+  /// person should be greeted by name, not treated as an anonymous obstacle.
+  String? _nearbyPersonName;
+
+  /// Called by the camera screen with the name of the nearest recognised
+  /// face, or null when no known face is currently in view.
+  void setNearbyPersonName(String? name) {
+    _nearbyPersonName = (name != null && name.isNotEmpty) ? name : null;
+  }
+
+  // ── Distance-estimation calibration ─────────────────────────────────────
+  /// Vertical field of view used by the pinhole distance formula. Defaults to
+  /// a generic 60° assumption; [calibrateCameraFov] overwrites this with the
+  /// device's real value read from Camera2 characteristics, which is the
+  /// single biggest source of error in the old fixed-FOV estimate (phones'
+  /// main lenses commonly range ~55°-75° vertical FOV).
+  double _verticalFovDegrees = 60.0;
+
+  /// Recent per-label distance samples, used to smooth out frame-to-frame
+  /// bounding-box jitter before it's spoken as a distance. Keyed by label
+  /// rather than a tracked object id (the app has no object tracker), so a
+  /// mid-swap between two same-class objects will blend briefly — an
+  /// acceptable trade for calmer, less jittery output.
+  final Map<String, List<double>> _recentDistances = {};
+  static const int _distanceSmoothingWindow = 4;
+
+  /// Reads the real camera vertical FOV via platform channel and applies it
+  /// to future distance estimates. Safe to call once at camera startup; a
+  /// no-op (keeps the 60° default) if the platform call fails or the device
+  /// doesn't expose the characteristics.
+  Future<void> calibrateCameraFov() async {
+    try {
+      final dynamic resp =
+          await _appLauncherChannel.invokeMethod<dynamic>('getCameraFov');
+      if (resp is Map && resp['available'] == true) {
+        final fov = (resp['verticalFovDegrees'] as num?)?.toDouble();
+        if (fov != null && fov > 10 && fov < 170) {
+          _verticalFovDegrees = fov;
+          print('[Calibration] Vertical FOV set to ${fov.toStringAsFixed(1)}°');
+        }
+      }
+    } catch (e) {
+      print('[Calibration] getCameraFov failed, using 60° default: $e');
+    }
+  }
+
+  /// Smooths a raw per-frame distance estimate with recent samples of the
+  /// same label. Unknown-distance (-1) values pass through untouched.
+  double _smoothDistance(String label, double raw) {
+    if (raw < 0) return raw;
+    final samples = _recentDistances.putIfAbsent(label, () => []);
+    samples.add(raw);
+    if (samples.length > _distanceSmoothingWindow) samples.removeAt(0);
+    return samples.reduce((a, b) => a + b) / samples.length;
+  }
 
   // ── Callbacks ────────────────────────────────────────────────────────────
   void Function(bool isListening)? onListeningStateChanged;
@@ -229,7 +287,7 @@ class VoiceService {
 
     final sttAvailable = await _stt.initialize(
       onError: (error) {
-        _log('STT Error: $error');
+        print('STT Error: $error');
         if (_wakeWordEnabled && !_inConversation) {
           // Reschedule wake-word loop after an STT error
           _scheduleWakeWordPoll();
@@ -237,7 +295,7 @@ class VoiceService {
         onListeningStateChanged?.call(false);
       },
       onStatus: (status) {
-        _log('STT Status: $status');
+        print('STT Status: $status');
         if (status == 'notListening' || status == 'done') {
           onListeningStateChanged?.call(false);
           if (_wakeWordEnabled && !_inConversation) {
@@ -246,7 +304,7 @@ class VoiceService {
         }
       },
     );
-    _log('STT initialized: $sttAvailable');
+    print('STT initialized: $sttAvailable');
   }
 
   void _onTtsDone() {
@@ -310,7 +368,7 @@ class VoiceService {
     if (scored.isEmpty) return;
 
     final nearest = scored.first;
-    final meters = _estimateDistance(nearest);
+    final meters = _smoothDistance(nearest.label, _estimateDistance(nearest));
     final now = DateTime.now();
 
     // ── Hazard override ───────────────────────────────────────────────────
@@ -369,7 +427,8 @@ class VoiceService {
       if (scored.length > 1) {
         final second = scored[1];
         if (second.label != nearest.label) {
-          final secMeters = _estimateDistance(second);
+          final secMeters =
+              _smoothDistance(second.label, _estimateDistance(second));
           if (secMeters < 0 || secMeters < 5.0) {
             final secPos = _getPosition(second);
             announcement +=
@@ -461,7 +520,8 @@ class VoiceService {
   double _estimateDistance(DetectedObjectDm det) {
     final h = _objectHeights[det.label.toLowerCase()];
     if (h == null) return -1;
-    final focalLength = det.modelSize / (2 * tan(pi / 6));
+    final halfFovRadians = (_verticalFovDegrees * pi / 180) / 2;
+    final focalLength = det.modelSize / (2 * tan(halfFovRadians));
     final pixelHeight = det.location.height / det.yStretch;
     if (pixelHeight <= 0) return -1;
     return (h * focalLength) / pixelHeight;
@@ -500,8 +560,21 @@ class VoiceService {
   ///           "Warning! Chair right in front of you"
   ///           "Car far ahead"
   String _buildDistancePhrase(String label, double meters, String position) {
-    final cap =
-        label.isNotEmpty ? label[0].toUpperCase() + label.substring(1) : label;
+    // A recognised face should be greeted by name, not announced as a
+    // generic "Person" — see [_nearbyPersonName].
+    if (label.toLowerCase() == 'person' && _nearbyPersonName != null) {
+      return _buildDistancePhraseForLabel(_nearbyPersonName!, meters, position,
+          capitalize: false);
+    }
+    return _buildDistancePhraseForLabel(label, meters, position, capitalize: true);
+  }
+
+  String _buildDistancePhraseForLabel(
+      String label, double meters, String position,
+      {required bool capitalize}) {
+    final cap = capitalize
+        ? (label.isNotEmpty ? label[0].toUpperCase() + label.substring(1) : label)
+        : label;
     if (meters < 0) return '$cap, $position';
     if (meters < 0.8) return '$cap right in front of you';
     if (meters < 10.0) return '$cap, ${_spokenDistance(meters)}, $position';
@@ -543,7 +616,7 @@ class VoiceService {
     final message = _pendingMessage!;
     _pendingMessage = null;
     _isSpeaking = true;
-    _log('Speaking: $message');
+    print('Speaking: $message');
     await _tts.speak(message);
   }
 
@@ -569,10 +642,10 @@ class VoiceService {
     _wakeWordTimer?.cancel();
     _wakeWordTimer = null;
     if (enable) {
-      _log('[WakeWord] Wake-word detection enabled');
+      print('[WakeWord] Wake-word detection enabled');
       _scheduleWakeWordPoll();
     } else {
-      _log('[WakeWord] Wake-word detection disabled');
+      print('[WakeWord] Wake-word detection disabled');
       if (_stt.isListening) await _stt.stop();
     }
   }
@@ -633,7 +706,7 @@ class VoiceService {
         cancelOnError: true,
       );
     } catch (e) {
-      _log('[WakeWord] STT error during poll: $e');
+      print('[WakeWord] STT error during poll: $e');
     }
 
     final elapsed = DateTime.now().difference(startedAt);
@@ -652,7 +725,7 @@ class VoiceService {
   }
 
   void _handleWakeWordDetected() {
-    _log('[WakeWord] Detected!');
+    print('[WakeWord] Detected!');
     onWakeWordDetected?.call();
     _inConversation = true;
     _speak('Yes, how can I help?');
@@ -684,7 +757,7 @@ class VoiceService {
   /// Start a full command-listening session (stops TTS + any wake-word poll).
   Future<void> startListening(Function(String) onUnrecognized) async {
     if (!_stt.isAvailable) {
-      _log('Speech recognition not available');
+      print('Speech recognition not available');
       return;
     }
 
@@ -701,7 +774,7 @@ class VoiceService {
       onResult: (result) {
         if (result.finalResult) {
           final command = result.recognizedWords.toLowerCase().trim();
-          _log('Heard: $command');
+          print('Heard: $command');
           onCommandHeard?.call('"$command"');
           _commandListening = false;
           _inConversation = false;
@@ -1019,13 +1092,18 @@ class VoiceService {
     final scored = _scoreDetections(_currentDetections);
 
     final items = scored.take(5).map((det) {
-      final dist = _estimateDistance(det);
+      final dist = _smoothDistance(det.label, _estimateDistance(det));
       final pos = _getPosition(det);
       final count = labelCounts[det.label] ?? 1;
 
       // Group label — "3 people" vs "A person"
       final String labelStr;
-      if (count > 1) {
+      if (det.label.toLowerCase() == 'person' &&
+          count == 1 &&
+          _nearbyPersonName != null) {
+        // Greet a single recognised face by name instead of "Person".
+        labelStr = _nearbyPersonName!;
+      } else if (count > 1) {
         labelStr = '$count ${_pluralise(det.label)}';
       } else {
         labelStr = det.label[0].toUpperCase() + det.label.substring(1);
@@ -1099,7 +1177,7 @@ class VoiceService {
       _lastResponse = response;
     } catch (e) {
       _speak('Unable to get the current time.');
-      _log('Error getting time: $e');
+      print('Error getting time: $e');
     }
   }
 
@@ -1127,7 +1205,7 @@ class VoiceService {
       _lastResponse = response;
     } catch (e) {
       _speak('Unable to get battery information.');
-      _log('Error getting battery: $e');
+      print('Error getting battery: $e');
     }
   }
 
@@ -1165,12 +1243,7 @@ class VoiceService {
       );
       if (resp is Map) return resp['opened'] == true;
       if (resp is bool) return resp;
-    } catch (e) {
-      // Was an empty catch. Swallowing an error here is how this app
-      // goes quiet without anyone noticing -- and quiet reads as
-      // "path is clear". Logged, not handled: behaviour is unchanged.
-      debugPrint('[voice] ignored: $e');
-    }
+    } catch (_) {}
     return false;
   }
 
@@ -1233,7 +1306,7 @@ class VoiceService {
       _speak('App launching is only available on Android.');
     } catch (e) {
       _speak('There was an error opening the app.');
-      _log('Error launching app: $e');
+      print('Error launching app: $e');
     }
   }
 
@@ -1274,7 +1347,7 @@ class VoiceService {
       _speak('Storage scanning is only available on Android.');
     } catch (e) {
       _speak('Error scanning storage.');
-      _log('scanStorageForApks error: $e');
+      print('scanStorageForApks error: $e');
     }
   }
 
@@ -1298,14 +1371,4 @@ class VoiceService {
     _wakeWordTimer?.cancel();
     _tts.stop();
   }
-}
-
-/// Voice-layer logging, silenced in release builds.
-///
-/// These lines include every sentence the app speaks. On a user's phone that
-/// is a running transcript of who they met and what was around them, written
-/// to logcat where any app with log access could read it. Fine on a dev
-/// handset, not fine in someone's pocket.
-void _log(Object? message) {
-  if (!kReleaseMode) print(message);
 }

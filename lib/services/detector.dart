@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:isolate';
 
 import 'package:camera/camera.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' hide Image;
 import 'package:flutter/services.dart';
 import 'package:image/image.dart';
@@ -232,14 +231,14 @@ class Detector {
     // release/profile build, corrupting the runtime graphs.
     if (!_perfCsvHeaderPrinted) {
       // ignore: avoid_print
-      _perfLog('PERF_CSV,timestamp_ms,inference_ms,fps,detections,'
+      print('PERF_CSV,timestamp_ms,inference_ms,fps,detections,'
           'convert_ms,rotate_ms,letterbox_ms,infer_ms,parse_ms');
       _perfCsvHeaderPrinted = true;
     }
     String ms(int i) =>
         (i < stageUs.length ? stageUs[i] / 1000.0 : 0.0).toStringAsFixed(2);
     // ignore: avoid_print
-    _perfLog('PERF_CSV,${now.millisecondsSinceEpoch},'
+    print('PERF_CSV,${now.millisecondsSinceEpoch},'
         '${inferenceMs.toStringAsFixed(1)},${fps.toStringAsFixed(2)},$detections,'
         '${ms(1)},${ms(2)},${ms(3)},${ms(4)},${ms(5)}');
   }
@@ -464,14 +463,4 @@ class _DetectorServer {
 
     return [..._lastCoco, ..._lastAcc];
   }
-}
-
-/// Frame telemetry, emitted in debug and profile builds but never in release.
-///
-/// `kReleaseMode` rather than `kDebugMode` on purpose: the performance captures
-/// this project relies on are taken with `flutter run --profile`, where
-/// kDebugMode is false. Gating on kDebugMode would have silently broken the
-/// measurement workflow.
-void _perfLog(String line) {
-  if (!kReleaseMode) print(line);
 }

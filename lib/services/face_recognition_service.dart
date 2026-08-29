@@ -97,21 +97,33 @@ class FaceRecognitionService {
   /// needs to be told how the frame is rotated or it looks for upright faces
   /// in a sideways image and finds none.
   int _sensorOrientation = 90;
-  set sensorOrientation(int degrees) => _sensorOrientation = degrees;
+  set sensorOrientation(int degrees) {
+    _sensorOrientation = degrees;
+    _lockedRotation = null;
+    _rotationScores.clear();
+    _probeFrames = 0;
+  }
 
-  /// Extra rotation applied on top of the sensor orientation before cropping.
+  /// Which way to rotate the RGB frame before cropping — DECIDED BY EXPERIMENT,
+  /// not by assumption.
   ///
-  /// This used to be chosen automatically by scoring both candidates against
-  /// the enrolled faces on the first few frames. That was a mistake: it is a
-  /// coin flip decided by whatever happens to be in front of the camera at
-  /// launch, so the app could behave completely differently between two runs
-  /// of the same build -- picking 180 degrees off, cropping upside down, and
-  /// matching everyone to whoever happens to be nearest in that garbage space.
+  /// ML Kit reports boxes in the upright frame. To cut that same region out of
+  /// our own copy we have to rotate it the same way — and "rotate 90°" is
+  /// ambiguous: the `image` package and ML Kit could disagree on direction. Get
+  /// it wrong and the crop comes from the diagonally opposite corner of the
+  /// frame every time: a wall, a shoulder, the ceiling. Detection still works,
+  /// a box still appears, and every distance sits stubbornly around 1.2–1.3 —
+  /// exactly the symptom of a face that is never recognised.
   ///
-  /// It is now a fixed, boring constant. If the crop thumbnail in the corner
-  /// of the camera screen is upside down, change this to 180. Deterministic
-  /// and wrong beats random and sometimes right.
-  static const int _extraRotation = 0;
+  /// So rather than reason about it, the first few frames with a face present
+  /// are embedded BOTH ways and scored against the enrolled people. Whichever
+  /// rotation produces the closer match wins and is latched for the session.
+  int? _lockedRotation;
+  final Map<int, double> _rotationScores = {};
+  int _probeFrames = 0;
+  static const int _probeFramesNeeded = 4;
+  List<int> get _rotationCandidates =>
+      [_sensorOrientation, (_sensorOrientation + 180) % 360];
 
   // ── Announcement cooldown ─────────────────────────────────────────────────
   final Map<String, DateTime> _lastAnnounced = {};
@@ -237,12 +249,7 @@ class FaceRecognitionService {
     _lastServerCheck = now;
     try {
       await ApiService.instance.checkStatus();
-    } catch (e) {
-      // Was an empty catch. Swallowing an error here is how this app
-      // goes quiet without anyone noticing -- and quiet reads as
-      // "path is clear". Logged, not handled: behaviour is unchanged.
-      debugPrint('[face recognition] ignored: $e');
-    }
+    } catch (_) {}
   }
 
   // ── Frame processing ──────────────────────────────────────────────────────
@@ -270,7 +277,10 @@ class FaceRecognitionService {
       }
       unawaited(_refreshServerFlag());
 
-      final rotation = (_sensorOrientation + _extraRotation) % 360;
+      if (base != null && _interpreter != null && _registeredFaces.isNotEmpty) {
+        _calibrateRotation(base, faces.first.boundingBox);
+      }
+      final rotation = _lockedRotation ?? _sensorOrientation;
       final rgb = base == null ? null : img.copyRotate(base, angle: rotation);
 
       final scaleX = ScreenParams.screenSize.width / cameraImage.width;
@@ -363,6 +373,59 @@ class FaceRecognitionService {
     _lastFaceCount = count;
     debugPrint('[FaceRecognition] ML Kit sees $count face(s); '
         '$registeredCount enrolled');
+  }
+
+  /// Try both plausible rotations, keep the one that actually matches.
+  void _calibrateRotation(img.Image base, Rect box) {
+    if (_lockedRotation != null) return;
+
+    for (final angle in _rotationCandidates) {
+      try {
+        final crop = _cropFace(img.copyRotate(base, angle: angle), box);
+        if (crop == null) continue;
+        final match = _nearestDistance(_embed(crop));
+        _rotationScores[angle] = (_rotationScores[angle] ?? 0) + match;
+      } catch (_) {
+        // A candidate that cannot even be cropped simply scores nothing.
+      }
+    }
+
+    _probeFrames++;
+    if (_probeFrames < _probeFramesNeeded || _rotationScores.isEmpty) return;
+
+    final ranked = _rotationScores.entries.toList()
+      ..sort((a, b) => a.value.compareTo(b.value));
+    _lockedRotation = ranked.first.key;
+
+    final summary = ranked
+        .map((e) => '${e.key}deg avg '
+            '${(e.value / _probeFrames).toStringAsFixed(3)}')
+        .join(' | ');
+    debugPrint('[FaceRecognition] rotation calibrated -> ${_lockedRotation}deg '
+        '($summary)');
+
+    final bestAvg = ranked.first.value / _probeFrames;
+    if (bestAvg > 1.15) {
+      debugPrint('[FaceRecognition] NOTE: even the better rotation averages '
+          '${bestAvg.toStringAsFixed(3)}. If the enrolment self-spread above '
+          'was GOOD, this person genuinely is not the enrolled one; if it was '
+          'BAD or missing, re-register.');
+    }
+  }
+
+  /// Distance to the closest enrolled sample, ignoring the threshold.
+  double _nearestDistance(List<double> probe) {
+    var best = double.infinity;
+    for (final person in _registeredFaces) {
+      final candidates =
+          person.samples.isNotEmpty ? person.samples : [person.embedding];
+      for (final c in candidates) {
+        if (c.isEmpty) continue;
+        final d = _euclidean(probe, c);
+        if (d < best) best = d;
+      }
+    }
+    return best.isFinite ? best : 2.0;
   }
 
   bool _shouldQueryServer() {
@@ -542,12 +605,7 @@ class FaceRecognitionService {
     } finally {
       try {
         if (await file.exists()) await file.delete();
-      } catch (e) {
-        // Was an empty catch. Swallowing an error here is how this app
-        // goes quiet without anyone noticing -- and quiet reads as
-        // "path is clear". Logged, not handled: behaviour is unchanged.
-        debugPrint('[face recognition] ignored: $e');
-      }
+      } catch (_) {}
     }
   }
 

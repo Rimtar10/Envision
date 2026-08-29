@@ -1,9 +1,12 @@
 package com.example.tensorflow_demo
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.os.Build
 import android.os.Environment
 import androidx.core.app.ActivityCompat
@@ -106,6 +109,9 @@ class MainActivity : FlutterActivity() {
                             result.success(mapOf("granted" to true, "apks" to scanForApks()))
                         }
                     }
+                    "getCameraFov" -> {
+                        result.success(getCameraFov())
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -191,6 +197,55 @@ class MainActivity : FlutterActivity() {
                 "reason"        to "no_match",
                 "candidates"    to candidateList,
             )
+        }
+    }
+
+    // ── Camera calibration ──────────────────────────────────────────────────
+    // Distance estimation (voice_service.dart) assumes a fixed 60° vertical
+    // field of view, which is wrong for most phones (many have wider main
+    // lenses) and produces a device-dependent, silent distance error. This
+    // reads the REAL vertical FOV from the back camera's Camera2
+    // characteristics (physical sensor size + focal length) so the app can
+    // calibrate itself on whatever device it runs on instead of guessing.
+    private fun getCameraFov(): Map<String, Any> {
+        try {
+            val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            var cameraId: String? = null
+            for (id in manager.cameraIdList) {
+                val chars = manager.getCameraCharacteristics(id)
+                if (chars.get(CameraCharacteristics.LENS_FACING) ==
+                    CameraCharacteristics.LENS_FACING_BACK
+                ) {
+                    cameraId = id
+                    break
+                }
+            }
+            if (cameraId == null) return mapOf("available" to false)
+
+            val chars = manager.getCameraCharacteristics(cameraId)
+            val focalLengths =
+                chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+            val sensorSize = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+            if (focalLengths == null || focalLengths.isEmpty() || sensorSize == null) {
+                return mapOf("available" to false)
+            }
+
+            // Use the primary (first) lens — phones with multiple rear lenses
+            // (ultra-wide/telephoto) list the main lens first.
+            val focalLengthMm = focalLengths[0].toDouble()
+            val verticalFovDeg = Math.toDegrees(
+                2 * Math.atan((sensorSize.height / 2.0) / focalLengthMm)
+            )
+            val horizontalFovDeg = Math.toDegrees(
+                2 * Math.atan((sensorSize.width / 2.0) / focalLengthMm)
+            )
+            return mapOf(
+                "available" to true,
+                "verticalFovDegrees" to verticalFovDeg,
+                "horizontalFovDegrees" to horizontalFovDeg
+            )
+        } catch (e: Exception) {
+            return mapOf("available" to false)
         }
     }
 

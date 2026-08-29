@@ -69,12 +69,7 @@ class _FaceRegistrationScreenState extends State<FaceRegistrationScreen> {
       }
       await _cameraController?.dispose();
       _cameraController = null;
-    } catch (e) {
-      // Was an empty catch. Swallowing an error here is how this app
-      // goes quiet without anyone noticing -- and quiet reads as
-      // "path is clear". Logged, not handled: behaviour is unchanged.
-      debugPrint('[face registration] ignored: $e');
-    }
+    } catch (_) {}
     if (mounted) Navigator.pop(context);
   }
 
@@ -233,12 +228,7 @@ class _FaceRegistrationScreenState extends State<FaceRegistrationScreen> {
       if (_cameraController?.value.isStreamingImages == true) {
         _cameraController?.stopImageStream();
       }
-    } catch (e) {
-      // Was an empty catch. Swallowing an error here is how this app
-      // goes quiet without anyone noticing -- and quiet reads as
-      // "path is clear". Logged, not handled: behaviour is unchanged.
-      debugPrint('[face registration] ignored: $e');
-    }
+    } catch (_) {}
     _cameraController?.dispose();
     _cameraController = null;
     _nameController.dispose();

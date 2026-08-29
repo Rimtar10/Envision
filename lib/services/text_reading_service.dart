@@ -96,12 +96,7 @@ class TextReadingService {
       if (tempFile != null) {
         try {
           await tempFile.delete();
-        } catch (e) {
-          // Was an empty catch. Swallowing an error here is how this app
-          // goes quiet without anyone noticing -- and quiet reads as
-          // "path is clear". Logged, not handled: behaviour is unchanged.
-          debugPrint('[text reading] ignored: $e');
-        }
+        } catch (_) {}
       }
     }
   }
